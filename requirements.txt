@@ -1,0 +1,17 @@
+# Geo-Detection-System — zależności prototypu
+# UWAGA: torch instaluj OSOBNO z indeksu PyTorcha (cu124) — patrz README/komenda poniżej.
+
+ultralytics>=8.3.0
+opencv-python>=4.10.0
+numpy>=1.26,<2.3
+Pillow>=10.0.0
+exifread>=3.0.0
+requests>=2.32.0
+
+# Geo / rastry — rasterio 1.4+ ma wheels z wbudowanym GDAL (na Windows nie trzeba osobno instalować GDAL)
+rasterio>=1.4.0
+pyproj>=3.6.0
+owslib>=0.31.0
+
+# Mapa podglądowa
+folium>=0.17.0
