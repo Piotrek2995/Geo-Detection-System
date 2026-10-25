@@ -1,0 +1,12 @@
+# Srodowisko / IDE
+.venv/
+.idea/
+__pycache__/
+*.pyc
+
+# Wyniki uruchomien (nie commitujemy)
+output/
+detections.*
+detections_map.html
+nmt/
+odm_project/

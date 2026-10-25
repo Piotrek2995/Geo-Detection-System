@@ -12,6 +12,7 @@ requests>=2.32.0
 rasterio>=1.4.0
 pyproj>=3.6.0
 owslib>=0.31.0
+PyYAML>=6.0
 
 # Mapa podglądowa
 folium>=0.17.0

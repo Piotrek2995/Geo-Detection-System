@@ -1,0 +1,32 @@
+# Geo-Detection-System — przykladowa konfiguracja.
+# Sciezki wzgledne liczone sa od katalogu, w ktorym lezy ten plik.
+
+photos_dir: zdjecia
+odm_dir: odm_project          # wynik OpenDroneMap (opensfm/reconstruction.json, reference_lla.json)
+model_path: LudzieiNamioty.pt
+output_dir: output
+
+# Jedno zdjecie (string) albo lista
+images:
+  - SING0304.JPG
+  - SING0316.JPG
+
+# Zalozona wysokosc lotu nad terenem [m] (kalibracja Z; Potensic zapisuje AGL od startu)
+agl_fallback_m: 45.0
+
+dem:
+  source: gugik               # gugik | raster
+  raster_path: null           # np. nmt/nmt_2180.tif (dla source: raster), EPSG:2180
+  gugik_url: https://services.gugik.gov.pl/nmt/
+  timeout_s: 10.0
+
+detect:
+  conf: 0.25
+  classes: null               # null = wszystkie; np. [namiot, people]
+  device: null                # null = auto; np. "0" (GPU) lub "cpu"
+
+raycast:
+  step_m: 5.0
+  t_min_m: 0.5
+  t_max_m: 800.0
+  bisect_iters: 25
