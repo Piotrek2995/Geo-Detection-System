@@ -46,6 +46,25 @@ class RaycastConfig:
 
 
 @dataclass
+class FilterConfig:
+    """Filtry pojedynczych detekcji. Odrzucone zostaja w wynikach z `rejected_reason`,
+    ale nie biora udzialu w agregacji. None / False = filtr wylaczony."""
+    border_margin_px: float = 2.0      # bbox blizej krawedzi niz tyle px -> touches_border
+    exclude_border: bool = False
+    max_range_m: Optional[float] = None
+    max_incidence_deg: Optional[float] = None
+
+
+@dataclass
+class AggregateConfig:
+    """DBSCAN w EPSG:2180, osobno dla kazdej klasy.
+    weights: "equal" | "conf" | "cos_incidence" — wagi sredniej pozycji obiektu."""
+    eps_m: float = 2.5
+    min_samples: int = 1
+    weights: str = "equal"
+
+
+@dataclass
 class PipelineConfig:
     photos_dir: Path = Path("zdjecia")
     odm_dir: Path = Path("odm_project")
@@ -58,6 +77,8 @@ class PipelineConfig:
     dem: DemConfig = field(default_factory=DemConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     raycast: RaycastConfig = field(default_factory=RaycastConfig)
+    filters: FilterConfig = field(default_factory=FilterConfig)
+    aggregate: AggregateConfig = field(default_factory=AggregateConfig)
 
     # ── pochodne sciezki ODM ──
     @property
@@ -108,7 +129,8 @@ class PipelineConfig:
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path"}
-_NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig}
+_NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
+           "filters": FilterConfig, "aggregate": AggregateConfig}
 
 
 def _build(cls, data: dict[str, Any]):

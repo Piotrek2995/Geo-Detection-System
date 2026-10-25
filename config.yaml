@@ -30,3 +30,20 @@ raycast:
   t_min_m: 0.5
   t_max_m: 800.0
   bisect_iters: 25
+
+# Filtry pojedynczych detekcji. Odrzucone zostaja w detections.geojson z polem
+# rejected_reason, ale nie wchodza do agregacji. null / false = filtr wylaczony.
+filters:
+  border_margin_px: 2.0       # bbox blizej krawedzi kadru niz tyle px -> touches_border
+  exclude_border: false       # odrzucac obiekty uciete krawedzia kadru
+  max_range_m: null           # np. 150
+  max_incidence_deg: null     # np. 65 (kat promienia od pionu)
+
+# Agregacja wielowidokowa (DBSCAN w EPSG:2180, osobno dla kazdej klasy)
+aggregate:
+  # Uwaga: przy min_samples=1 rozrzut w klastrze jest ograniczony przez eps (laczenie
+  # pojedyncze). Na locie testowym bledy miedzy przelotami siegaja 5-10 m (zalozenie AGL),
+  # wiec eps=2.5 dzieli jeden namiot na kilka obiektow; eps=10 daje stabilny podzial.
+  eps_m: 2.5
+  min_samples: 1              # 1 = obiekt widziany na jednym zdjeciu tez jest obiektem
+  weights: equal              # equal | conf | cos_incidence

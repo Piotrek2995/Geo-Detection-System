@@ -1,12 +1,13 @@
 """Geo-Detection-System — CLI.
 
 Przyklady:
-    python main.py                               # config.yaml (jesli istnieje) lub domyslne
+    python main.py                               # zdjecia z config.yaml (images)
+    python main.py --all                         # wszystkie zdjecia z rekonstrukcji ODM
     python main.py --config config.yaml
     python main.py --image SING0304.JPG --image SING0316.JPG
 
-Wynik: <output_dir>/detections.geojson + <output_dir>/detections_map.html
-(wszystkie podane zdjecia w jednym pliku).
+Wyniki w <output_dir>: detections.geojson, objects.geojson, objects.csv,
+detections_map.html, spread.png.
 """
 
 from __future__ import annotations
@@ -15,10 +16,11 @@ import argparse
 import logging
 from pathlib import Path
 
+from geodetect.batch import run_batch, summary_text
 from geodetect.config import PipelineConfig
 from geodetect.dem import GugikDem
-from geodetect.export import export_folium_map, export_geojson
-from geodetect.pipeline import build_context, run_single
+from geodetect.export import export_all
+from geodetect.pipeline import build_context
 
 DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
 
@@ -27,8 +29,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Detekcja YOLO + georeferencja ray castingiem na NMT.")
     p.add_argument("--config", type=Path, default=None,
                    help="plik YAML/JSON z konfiguracja (domyslnie config.yaml, jesli istnieje)")
-    p.add_argument("--image", action="append", default=None,
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--image", action="append", default=None,
                    help="nazwa zdjecia (mozna podac wielokrotnie); nadpisuje 'images' z configu")
+    g.add_argument("--all", action="store_true",
+                   help="wszystkie zdjecia z rekonstrukcji ODM")
     p.add_argument("-v", "--verbose", action="store_true", help="logi DEBUG")
     return p.parse_args()
 
@@ -41,6 +46,10 @@ def load_config(path: Path | None) -> PipelineConfig:
     return PipelineConfig.from_dict({}, base_dir=Path(__file__).parent)
 
 
+def print_progress(i: int, n: int, name: str) -> None:
+    print(f"[{i}/{n}] {name}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -51,23 +60,14 @@ def main() -> None:
         cfg.images = args.image
 
     ctx = build_context(cfg)
-    results = [run_single(cfg, name, ctx) for name in cfg.images]
+    batch = run_batch(cfg, ctx, images=None if args.all else cfg.images,
+                      progress_cb=print_progress)
+    paths = export_all(batch, cfg.output_dir)
 
-    for res in results:
-        c = res.camera
-        print(f"\n{res.image_name}: kamera EPSG:2180 X={c.x_2180:.2f} Y={c.y_2180:.2f} "
-              f"H={c.h:.2f} m npm")
-        for gd in res.detections:
-            h = gd.hit
-            print(f"  {gd.detection.cls_name:8s} conf={gd.detection.conf:.3f} "
-                  f"uv=({gd.uv[0]:.0f},{gd.uv[1]:.0f}) -> X={h.x_2180:.2f} Y={h.y_2180:.2f} "
-                  f"H={h.h:.2f}  ({h.lat:.7f}N, {h.lon:.7f}E)")
-        for det in res.misses:
-            print(f"  {det.cls_name:8s} conf={det.conf:.3f} — brak przeciecia z DEM")
-
-    out = cfg.output_dir
-    export_geojson(results, out / "detections.geojson")
-    export_folium_map(results, out / "detections_map.html")
+    print("\n" + summary_text(batch))
+    print("\nPliki wynikowe:")
+    for p in paths.values():
+        print(f"  {p}")
     if isinstance(ctx.dem, GugikDem):
         logging.info("NMT cache: hits=%d, http_requests=%d", ctx.dem.hits, ctx.dem.misses)
 

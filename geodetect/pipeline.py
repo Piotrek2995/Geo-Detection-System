@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from .config import PipelineConfig
+from .config import FilterConfig, PipelineConfig
 from .dem import DemSampler, resolve_dem
 from .detect import Detection, Detector
 from .exif import GpsFix, read_gps
@@ -49,6 +49,14 @@ class GeoDetection:
     detection: Detection
     uv: tuple[float, float]    # piksel reprezentatywny (na razie srodek bboxa)
     hit: RayHit
+    incidence_deg: float       # kat promienia wzgledem pionu (0 = nadir)
+    touches_border: bool       # bbox styka sie z krawedzia kadru (obiekt uciety)
+    rejected_reason: Optional[str] = None   # None = przyjeta
+    object_id: Optional[int] = None         # nadawane przy agregacji
+
+    @property
+    def accepted(self) -> bool:
+        return self.rejected_reason is None
 
 
 @dataclass
@@ -98,7 +106,31 @@ def run_single(config: PipelineConfig, image_name: str,
                      image_name, det.cls_name, *uv)
             result.misses.append(det)
             continue
-        result.detections.append(GeoDetection(image_name, det, uv, hit))
-    log.info("%s: %d detekcji z georeferencja, %d bez przeciecia",
-             image_name, len(result.detections), len(result.misses))
+        incidence = float(np.degrees(np.arccos(np.clip(-direction[2], -1.0, 1.0))))
+        gd = GeoDetection(image_name, det, uv, hit, incidence,
+                          touches_border(det.bbox, io.width, io.height,
+                                         config.filters.border_margin_px))
+        gd.rejected_reason = rejection_reason(gd, config.filters)
+        result.detections.append(gd)
+    n_rej = sum(not gd.accepted for gd in result.detections)
+    log.info("%s: %d detekcji z georeferencja (%d odrzuconych), %d bez przeciecia",
+             image_name, len(result.detections), n_rej, len(result.misses))
     return result
+
+
+def touches_border(bbox: tuple[float, float, float, float], width: int, height: int,
+                   margin_px: float) -> bool:
+    x1, y1, x2, y2 = bbox
+    return (x1 <= margin_px or y1 <= margin_px
+            or x2 >= width - margin_px or y2 >= height - margin_px)
+
+
+def rejection_reason(gd: GeoDetection, f: FilterConfig) -> Optional[str]:
+    """Pierwszy niespelniony filtr (opis) albo None, gdy detekcja przyjeta."""
+    if f.exclude_border and gd.touches_border:
+        return "touches_border"
+    if f.max_range_m is not None and gd.hit.range_m > f.max_range_m:
+        return f"range_m>{f.max_range_m:g}"
+    if f.max_incidence_deg is not None and gd.incidence_deg > f.max_incidence_deg:
+        return f"incidence_deg>{f.max_incidence_deg:g}"
+    return None

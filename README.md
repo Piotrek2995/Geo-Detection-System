@@ -32,21 +32,49 @@ python main.py --config config.yaml
 python main.py --image SING0304.JPG --image SING0316.JPG
 ```
 
-Wynik trafia do `output/detections.geojson` (WGS84 + atrybuty, w tym `x_2180`/`y_2180`)
-oraz `output/detections_map.html` (podgląd folium). Wszystkie parametry (ścieżki, zdjęcia,
-źródło DEM, klasy, confidence, ray casting) są w [config.yaml](config.yaml).
+Wszystkie parametry (ścieżki, zdjęcia, źródło DEM, klasy, confidence, ray casting,
+filtry, agregacja) są w [config.yaml](config.yaml).
+
+### Przetwarzanie wsadowe
+
+```powershell
+python main.py --all       # wszystkie zdjęcia z rekonstrukcji ODM
+```
+
+Wszystkie zdjęcia korzystają ze wspólnego kontekstu: model YOLO ładuje się raz, a cache
+NMT z GUGiK jest jeden. Zdjęcia z folderu, których nie ma w rekonstrukcji ODM (albo
+w folderze brakuje pliku), są pomijane z ostrzeżeniem i wymienione w podsumowaniu. Na koniec
+detekcje są agregowane DBSCAN-em (osobno dla każdej klasy, w EPSG:2180): ten sam obiekt
+widziany na kilku zdjęciach daje jeden punkt z liczbą widoków i rozrzutem.
 
 Wywołanie z kodu (np. z przyszłego GUI):
 
 ```python
 from geodetect import PipelineConfig, build_context, run_single
+from geodetect.batch import run_batch, summary_text
+from geodetect.export import export_all
 
 cfg = PipelineConfig.from_file("config.yaml")
 ctx = build_context(cfg)                 # DEM, ODM, model YOLO ładowane raz
-res = run_single(cfg, "SING0304.JPG", ctx)
-for gd in res.detections:
-    print(gd.detection.cls_name, gd.hit.x_2180, gd.hit.y_2180, gd.hit.h)
+res = run_single(cfg, "SING0304.JPG", ctx)               # jedno zdjęcie
+batch = run_batch(cfg, ctx, images=None,                  # None = wszystkie z ODM
+                  progress_cb=lambda i, n, name: print(i, n, name))
+print(summary_text(batch))
+export_all(batch, cfg.output_dir)
 ```
+
+### Pliki wyjściowe (`output/`)
+
+| Plik | Zawartość |
+|---|---|
+| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `conf`, `object_id`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, piksel, bbox |
+| `objects.geojson` | obiekty zagregowane: `n_views`, `images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `mean_incidence_deg`, `mean_range_m`, `duplicate_images` |
+| `objects.csv` | to samo co `objects.geojson` + `lon`, `lat` |
+| `detections_map.html` | mapa folium z warstwami: kamery, detekcje, obiekty, linie detekcja→obiekt, odrzucone; popupy z atrybutami |
+| `spread.png` | odchylenie detekcji od środka obiektu w funkcji `incidence_deg` i `range_m` |
+
+Pole `duplicate_images` (i ostrzeżenie w podsumowaniu) oznacza klaster, w którym to samo
+zdjęcie występuje więcej niż raz. To może znaczyć, że scalono dwa blisko położone obiekty.
 
 ## Testy
 
@@ -66,8 +94,10 @@ geodetect/
   odm.py        CameraIO / CameraEO z reconstruction.json, kalibracja Z (z_offset)
   detect.py     Detector (YOLO, model ładowany raz)
   raycast.py    piksel -> promień w ENU, marsz + bisekcja na DEM
-  pipeline.py   build_context, run_single -> ImageResult
-  export.py     GeoJSON, mapa folium
+  pipeline.py   build_context, run_single -> ImageResult (+ atrybuty i filtry detekcji)
+  batch.py      run_batch -> BatchResult, summary_text
+  aggregate.py  DBSCAN, AggregatedObject (pozycja ważona, widoki, rozrzut)
+  export.py     GeoJSON, CSV, mapa folium z warstwami, wykres rozrzutu
 main.py         CLI
 config.yaml     przykładowa konfiguracja
 legacy/         zamrożony prototyp z raportu 1 (do porównań)
