@@ -57,7 +57,7 @@ z_anchor:
   # dem_alignment  — DEM z ODM (odm_dem/dtm.tif, dsm.tif) dopasowany do NMT:
   #                  z_offset = mediana(NMT - DEM_ODM) w otwartym terenie
   # (multiview_check to tylko diagnostyka: scripts/zcal_compare.py)
-  mode: agl_assumption
+  mode: dem_alignment
   agl_m: 45.0
   # ground_frame
   image: null                 # np. SING0001.JPG
