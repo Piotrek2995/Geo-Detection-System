@@ -10,7 +10,9 @@ from typing import Callable, Optional
 from .aggregate import AggregatedObject, aggregate
 from .config import PipelineConfig
 from .detect import Detection
+from .dem import save_dem_cache
 from .pipeline import GeoDetection, ImageResult, PipelineContext, build_context, run_single
+from .zcal import ZCalibration
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ class BatchResult:
     images: list[ImageResult]
     skipped: dict[str, str]              # nazwa zdjecia -> powod pominiecia
     objects: list[AggregatedObject] = field(default_factory=list)
+    z_calibration: Optional[ZCalibration] = None
 
     @property
     def detections(self) -> list[GeoDetection]:
@@ -49,7 +52,10 @@ class BatchResult:
 
 def summary_text(batch: BatchResult) -> str:
     """Czytelne podsumowanie wsadu (do CLI / logu / raportu)."""
-    lines = [f"Zdjecia przetworzone: {len(batch.images)}, pominiete: {len(batch.skipped)}"]
+    lines = []
+    if batch.z_calibration is not None:
+        lines.append(f"Kalibracja Z — {batch.z_calibration.describe()}")
+    lines.append(f"Zdjecia przetworzone: {len(batch.images)}, pominiete: {len(batch.skipped)}")
     for name, reason in sorted(batch.skipped.items()):
         lines.append(f"  pominiete {name}: {reason}")
     lines.append(f"Detekcje: {len(batch.detections)} z georeferencja "
@@ -118,7 +124,8 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
             log.exception("Blad przetwarzania %s", name)
             skipped[name] = f"blad: {e}"
 
-    batch = BatchResult(results, skipped)
+    save_dem_cache(ctx.dem)
+    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration)
     batch.objects = aggregate(batch.detections, cfg.aggregate)
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),

@@ -76,12 +76,52 @@ export_all(batch, cfg.output_dir)
 Pole `duplicate_images` (i ostrzeżenie w podsumowaniu) oznacza klaster, w którym to samo
 zdjęcie występuje więcej niż raz. To może znaczyć, że scalono dwa blisko położone obiekty.
 
+### Kalibracja wysokości (`z_anchor`)
+
+Potensic zapisuje GPS Altitude jako AGL od punktu startu, więc wysokości w ODM (kamery,
+chmura, DEM ODM) nie są wysokościami npm. Obowiązuje `H [m npm] = h_ODM + z_offset`,
+a `z_offset` wyznacza się według `z_anchor.mode`:
+
+| Tryb | Skąd z_offset | Kiedy |
+|---|---|---|
+| `agl_assumption` | `NMT(mediana xy kamer) + agl_m − średnia h kamer` | fallback, wymaga zgadnięcia wysokości lotu |
+| `ground_frame` | `NMT(xy anchora) + lens_height_m − h anchora` | gdy pierwsze zdjęcie zrobiono **na ziemi w punkcie startu** (`z_anchor.image`) |
+| `dem_alignment` | `mediana(NMT − DEM_ODM)` w ok. 300 punktach otwartego terenu (DSM−DTM < 0,5 m) | **zalecany**, wymaga `odm_dem/dtm.tif` / `dsm.tif` (ODM z `--dtm --dsm`, patrz [ODM.md](ODM.md)) |
+
+`dem_alignment` dopasowuje też płaszczyznę `a·E + b·N + c` do różnic i raportuje jej nachylenie
+oraz azymut. Przechył oznacza błąd orientacji modelu ODM; korekta płaszczyzną jest
+opcjonalna (`apply_tilt: true`). Próbki NMT trafiają do cache na dysku (`dem.cache_path`).
+
+Gdy ODM nie wygenerował DEM-ów, można zrobić **wstępny** DTM/DSM z chmury punktów ODM
+i wskazać go w `z_anchor.odm_dtm` / `odm_dsm`:
+
+```powershell
+python scripts/pointcloud_to_dem.py          # -> output/cache/odm_pc_dtm.tif, odm_pc_dsm.tif
+python scripts/zcal_compare.py               # porównanie trybów + wykresy w output/zcal/
+```
+
+`zcal_compare.py` dodatkowo uruchamia **diagnostykę `multiview_check`**. Jest to skan
+`z_offset` w zakresie ±15 m, który minimalizuje rozrzut statycznych namiotów. Służy tylko
+jako niezależna kontrola, a nie do kalibracji wyników, bo ten sam rozrzut jest potem
+miarą jakości. Optimum jest zaniżone o wysokość punktu reprezentatywnego nad gruntem
+(środek bboxa).
+
 ## Testy
 
 ```powershell
 python -m unittest discover -s tests -t . -v      # testy jednostkowe (offline)
 python scripts/compare_legacy.py                  # prototyp vs pakiet (GPU + internet)
+python scripts/zcal_compare.py                    # tryby kalibracji Z (GPU + internet)
 ```
+
+### Znany problem: `PROJ_LIB` z PostgreSQL/PostGIS
+
+Instalator PostgreSQL ustawia globalnie `PROJ_LIB` i `GDAL_DATA` na własny, starszy
+`proj.db`. Rasterio (GDAL) zgłasza wtedy ostrzeżenia `proj.db ... comes from another PROJ
+installation` i nie rozpoznaje kodów EPSG przy zapisie GeoTIFF. Pakiet przelicza współrzędne
+przez pyproj, który ma własną bazę, więc wyniki są poprawne. Żeby pozbyć się problemu,
+usuń te zmienne w sesji venv (`Remove-Item Env:PROJ_LIB, Env:GDAL_DATA`) albo ze zmiennych
+systemowych, jeśli PostGIS ich nie potrzebuje.
 
 ## Struktura
 
@@ -91,17 +131,20 @@ geodetect/
   exif.py       odczyt GPS z EXIF
   dem.py        DemSampler: GugikDem (REST GetHByXY), RasterDem (GeoTIFF), resolve_dem
   geo.py        EnuFrame: lokalne ENU (ODM) -> WGS84 -> EPSG:2180 (ściśle)
-  odm.py        CameraIO / CameraEO z reconstruction.json, kalibracja Z (z_offset)
+  odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
+  zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment
   detect.py     Detector (YOLO, model ładowany raz)
   raycast.py    piksel -> promień w ENU, marsz + bisekcja na DEM
   pipeline.py   build_context, run_single -> ImageResult (+ atrybuty i filtry detekcji)
   batch.py      run_batch -> BatchResult, summary_text
   aggregate.py  DBSCAN, AggregatedObject (pozycja ważona, widoki, rozrzut)
   export.py     GeoJSON, CSV, mapa folium z warstwami, wykres rozrzutu
+  diagnostics.py residua wzdłuż/w poprzek promienia, multiview_check (skan z_offset)
 main.py         CLI
 config.yaml     przykładowa konfiguracja
 legacy/         zamrożony prototyp z raportu 1 (do porównań)
-scripts/        compare_legacy.py — porównanie prototyp vs pakiet
+scripts/        compare_legacy.py — prototyp vs pakiet; zcal_compare.py — tryby kalibracji Z;
+                pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM
 tests/          testy jednostkowe
 ODM.md          instrukcja OpenDroneMap
 PROGRES/        raporty postępu
@@ -117,4 +160,6 @@ PROGRES/        raporty postępu
 - **EPSG:2180 w kodzie = (easting, northing).** REST GUGiK `GetHByXY` używa konwencji
   geodezyjnej: `x` = northing, `y` = easting. Zamiana jest tylko w `GugikDem`.
 - **Wysokości:** Potensic zapisuje GPS Altitude jako AGL od startu. Obowiązuje
-  `H [m npm] = h_local + z_offset`, gdzie `z_offset = NMT(mediana kamer) + AGL − mean(alt_local)`.
+  `H [m npm] = h_local + z_offset`, a `z_offset` wyznacza się według `z_anchor.mode` (wyżej).
+  Kamery, chmura punktów i DEM ODM mają wspólną oś Z (sprawdzone: wysokość kamery minus
+  DEM ODM pod nią daje ok. 42 m AGL).

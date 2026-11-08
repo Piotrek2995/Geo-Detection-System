@@ -17,8 +17,9 @@ from .dem import DemSampler, resolve_dem
 from .detect import Detection, Detector
 from .exif import GpsFix, read_gps
 from .geo import EnuFrame
-from .odm import CameraEO, CameraIO, OdmReconstruction, ZCalibration, compute_z_offset
+from .odm import CameraEO, CameraIO, OdmReconstruction
 from .raycast import RayHit, pixel_to_ray, raycast
+from .zcal import ZCalibration, calibrate_z
 
 log = logging.getLogger(__name__)
 
@@ -75,11 +76,12 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -
     dem = resolve_dem(config.dem)
     rec = OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
     base_frame = EnuFrame(rec.ref)
-    z_cal = compute_z_offset(config.shots_geojson_path, dem, base_frame, config.agl_fallback_m)
+    z_cal = calibrate_z(config, dem, rec, base_frame)
+    log.info("Kalibracja Z — %s", z_cal.describe())
     if detector is None:
         detector = Detector(config.model_path, conf=config.detect.conf,
                             classes=config.detect.classes, device=config.detect.device)
-    return PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset),
+    return PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
                            z_cal, detector)
 
 

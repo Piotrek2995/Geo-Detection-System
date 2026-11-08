@@ -11,14 +11,12 @@ images:
   - SING0304.JPG
   - SING0316.JPG
 
-# Zalozona wysokosc lotu nad terenem [m] (kalibracja Z; Potensic zapisuje AGL od startu)
-agl_fallback_m: 45.0
-
 dem:
   source: gugik               # gugik | raster
   raster_path: null           # np. nmt/nmt_2180.tif (dla source: raster), EPSG:2180
   gugik_url: https://services.gugik.gov.pl/nmt/
   timeout_s: 10.0
+  cache_path: output/cache/gugik_nmt.json   # cache probek GUGiK na dysku (null = tylko w pamieci)
 
 detect:
   conf: 0.25
@@ -42,8 +40,35 @@ filters:
 # Agregacja wielowidokowa (DBSCAN w EPSG:2180, osobno dla kazdej klasy)
 aggregate:
   # Uwaga: przy min_samples=1 rozrzut w klastrze jest ograniczony przez eps (laczenie
-  # pojedyncze). Na locie testowym bledy miedzy przelotami siegaja 5-10 m (zalozenie AGL),
-  # wiec eps=2.5 dzieli jeden namiot na kilka obiektow; eps=10 daje stabilny podzial.
+  # pojedyncze). Na locie testowym z z_anchor.mode=agl_assumption bledy miedzy przelotami
+  # siegaja 5-10 m i eps=2.5 dzieli jeden namiot na kilka obiektow; po kalibracji
+  # dem_alignment glowny namiot (26 widokow) miesci sie w eps=2.5 (RMS 1.2 m).
   eps_m: 2.5
   min_samples: 1              # 1 = obiekt widziany na jednym zdjeciu tez jest obiektem
   weights: equal              # equal | conf | cos_incidence
+
+# Kalibracja wysokosci: H [m npm] = h_ODM + z_offset. Potensic zapisuje GPS Altitude jako
+# AGL od punktu startu, wiec wysokosci w ODM (kamery, chmura, DEM ODM) nie sa npm.
+z_anchor:
+  # agl_assumption — z_offset = NMT(mediana xy kamer) + agl_m - srednia h kamer
+  #                  (fallback; wymaga zgadniecia wysokosci lotu)
+  # ground_frame   — pierwsze zdjecie zrobione NA ZIEMI w punkcie startu (`image`):
+  #                  z_offset = NMT(xy anchora) + lens_height_m - h anchora w ODM
+  # dem_alignment  — DEM z ODM (odm_dem/dtm.tif, dsm.tif) dopasowany do NMT:
+  #                  z_offset = mediana(NMT - DEM_ODM) w otwartym terenie
+  # (multiview_check to tylko diagnostyka: scripts/zcal_compare.py)
+  mode: agl_assumption
+  agl_m: 45.0
+  # ground_frame
+  image: null                 # np. SING0001.JPG
+  lens_height_m: 0.15
+  # dem_alignment (ODM musi wygenerowac DEM: --dtm --dsm, patrz ODM.md; tymczasowo mozna
+  # wskazac wstepny DEM z chmury: output/cache/odm_pc_dtm.tif / odm_pc_dsm.tif,
+  # generowany przez scripts/pointcloud_to_dem.py)
+  odm_dtm: null               # null = odm_project/odm_dem/dtm.tif
+  odm_dsm: null               # null = odm_project/odm_dem/dsm.tif
+  n_samples: 300
+  buffer_m: 10.0              # min. odleglosc probek od krawedzi DEM ODM
+  max_dsm_dtm_m: 0.5          # przy obu DEM-ach: tylko punkty z DSM-DTM < 0.5 m
+  apply_tilt: false           # true = korygowac tez dopasowana plaszczyzne (przechyl EO z ODM)
+  seed: 0

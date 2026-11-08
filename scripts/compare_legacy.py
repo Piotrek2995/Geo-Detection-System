@@ -2,8 +2,10 @@
 
 Warianty:
   A  legacy           — stary main.py bez zmian
-  B  new, oba bledy   — nowy kod + naiwne ENU (ref_x+E, ref_y+N) + zamienione osie GUGiK
+  B  new, stare bledy — nowy kod + naiwne ENU (ref_x+E, ref_y+N) + zamienione osie GUGiK
+                        + reconstruction.json (UTM z offsetem) czytany jak ENU
                         (powinno dac to samo co A -> refaktor wierny)
+  (C i D czytaja reconstruction.topocentric.json; kalibracja Z: agl_assumption)
   C  new, naiwne ENU  — poprawione osie GUGiK, naiwne ENU
   D  new              — pelna poprawka (scisle ENU -> WGS84 -> EPSG:2180)
 
@@ -25,7 +27,8 @@ from geodetect.config import PipelineConfig  # noqa: E402
 from geodetect.dem import GugikDem  # noqa: E402
 from geodetect.detect import Detector  # noqa: E402
 from geodetect.geo import EnuFrame  # noqa: E402
-from geodetect.odm import OdmReconstruction, compute_z_offset  # noqa: E402
+from geodetect.odm import OdmReconstruction  # noqa: E402
+from geodetect.zcal import agl_assumption  # noqa: E402
 from geodetect.pipeline import PipelineContext, run_single  # noqa: E402
 
 
@@ -71,12 +74,13 @@ def run_legacy(image_name: str) -> list[dict]:
 
 
 def run_new(cfg: PipelineConfig, image_name: str, detector: Detector,
-            naive_enu: bool, swapped_axes: bool) -> list[dict]:
+            naive_enu: bool, swapped_axes: bool, legacy_rec: bool = False) -> list[dict]:
     dem_cls = SwappedAxesGugikDem if swapped_axes else GugikDem
     dem = dem_cls(cfg.dem.gugik_url, timeout=cfg.dem.timeout_s)
-    rec = OdmReconstruction(cfg.reconstruction_path, cfg.reference_lla_path)
+    rec_path = cfg.odm_dir / "opensfm" / "reconstruction.json" if legacy_rec else cfg.reconstruction_path
+    rec = OdmReconstruction(rec_path, cfg.reference_lla_path)
     frame = (NaiveEnuFrame if naive_enu else EnuFrame)(rec.ref)
-    z_cal = compute_z_offset(cfg.shots_geojson_path, dem, frame, cfg.agl_fallback_m)
+    z_cal = agl_assumption(cfg.shots_geojson_path, dem, frame, cfg.z_anchor.agl_m)
     ctx = PipelineContext(cfg, dem, rec, frame.with_z_offset(z_cal.offset), z_cal, detector)
     res = run_single(cfg, image_name, ctx)
     cam = (res.camera.x_2180, res.camera.y_2180, res.camera.h)
@@ -114,7 +118,7 @@ def main() -> None:
 
     for name in images:
         A = sorted(run_legacy(name), key=lambda r: r["uv"])
-        B = run_new(cfg, name, detector, naive_enu=True, swapped_axes=True)
+        B = run_new(cfg, name, detector, naive_enu=True, swapped_axes=True, legacy_rec=True)
         C = run_new(cfg, name, detector, naive_enu=True, swapped_axes=False)
         D = run_new(cfg, name, detector, naive_enu=False, swapped_axes=False)
 
@@ -133,9 +137,9 @@ def main() -> None:
             print(f"\n  {a['cls']} conf={a['conf']:.3f} uv=({a['uv'][0]:.0f},{a['uv'][1]:.0f})"
                   f"  odl. pozioma od kamery (D) = {dist_cam:.1f} m")
             print(f"    A legacy            : {fmt(a['xyz'])}")
-            print(f"    B new + oba bledy   : {fmt(b['xyz'])}   |A-B| = {d2(a['xyz'], b['xyz'])} m")
+            print(f"    B new + stare bledy : {fmt(b['xyz'])}   |A-B| = {d2(a['xyz'], b['xyz'])} m")
             print(f"    C new, naiwne ENU   : {fmt(c['xyz'])}   |B-C| = {d2(b['xyz'], c['xyz'])} m"
-                  f"  (efekt osi GUGiK)")
+                  f"  (osie GUGiK + uklad rekonstrukcji)")
             print(f"    D new (poprawne)    : {fmt(d['xyz'])}   |C-D| = {d2(c['xyz'], d['xyz'])} m"
                   f"  (efekt poprawki ENU)")
             print(f"    calkowita |A-D|     : {d2(a['xyz'], d['xyz'])} m")

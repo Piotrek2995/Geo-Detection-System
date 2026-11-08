@@ -1,4 +1,4 @@
-"""Parametry kamer (IO + EO) z rekonstrukcji OpenSfM/ODM i kalibracja Z.
+"""Parametry kamer (IO + EO) z rekonstrukcji OpenSfM/ODM (kalibracja Z: zcal.py).
 
 Konwencje OpenSfM:
   - `rotation` w reconstruction.json to wektor angle-axis (Rodriguesa); macierz R
@@ -14,13 +14,11 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
 
-from .dem import DemSampler
-from .geo import EnuFrame, GeoRef
+from .geo import GeoRef
 
 log = logging.getLogger(__name__)
 
@@ -48,15 +46,6 @@ class CameraEO:
     C_enu: np.ndarray  # (3,) — E, N, U [m] wzgledem reference_lla
     R_wc: np.ndarray   # (3,3) — world(ENU) -> camera
 
-
-@dataclass
-class ZCalibration:
-    """Korekta Z: H[m npm] = h_local + offset. `method` opisuje sposob wyznaczenia."""
-    offset: float
-    method: str
-    dem_under: Optional[float] = None
-    mean_alt_local: Optional[float] = None
-    agl_assumed_m: Optional[float] = None
 
 
 def intrinsics_to_pixels(cam_params: dict, w: int, h: int) -> CameraIO:
@@ -112,29 +101,3 @@ class OdmReconstruction:
         C_enu = -R_wc.T @ tvec
         return io, CameraEO(C_enu=C_enu, R_wc=R_wc)
 
-
-def compute_z_offset(shots_geojson: Path, dem: DemSampler, frame: EnuFrame,
-                     agl_assumed_m: float) -> ZCalibration:
-    """Korekta Z kompensujaca AGL-owy origin wysokosci Potensica/ODM.
-
-    Zaklada, ze srednia kamera leciala `agl_assumed_m` nad terenem pod mediana
-    pozycji kamer: offset = NMT(median_xy) + AGL - mean(alt_local).
-    """
-    if not shots_geojson.exists():
-        log.warning("Brak %s — z_offset=0", shots_geojson)
-        return ZCalibration(0.0, "none")
-    feats = json.loads(shots_geojson.read_text(encoding="utf-8"))["features"]
-    coords = np.array([f["geometry"]["coordinates"] for f in feats], dtype=np.float64)
-    med_lon, med_lat = float(np.median(coords[:, 0])), float(np.median(coords[:, 1]))
-    mean_alt_local = float(np.mean(coords[:, 2]))
-
-    x, y = frame.lonlat_to_puwg92(med_lon, med_lat)
-    nmt_under = dem.sample(x, y)
-    if nmt_under is None:
-        log.warning("DEM nie zwrocil wartosci dla median_xy=(%.1f, %.1f) — z_offset=0", x, y)
-        return ZCalibration(0.0, "none", mean_alt_local=mean_alt_local)
-
-    offset = nmt_under + agl_assumed_m - mean_alt_local
-    log.info("Z: NMT(median_xy)=%.2f m npm, mean_alt_local=%.2f, AGL=%.1f -> z_offset=%.2f m",
-             nmt_under, mean_alt_local, agl_assumed_m, offset)
-    return ZCalibration(offset, "agl_assumed", nmt_under, mean_alt_local, agl_assumed_m)

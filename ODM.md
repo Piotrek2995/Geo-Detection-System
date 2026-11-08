@@ -62,7 +62,15 @@ Po nowym locie wystarczy ponownie skopiować zawartość `./zdjecia/` do
 ## 4. Uruchomienie ODM
 
 ```powershell
-docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --project-path /datasets
+docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --project-path /datasets --dtm --dsm --dem-resolution 10
+```
+
+`--dtm --dsm` są potrzebne do kalibracji wysokości `z_anchor.mode: dem_alignment`
+(pliki `odm_dem/dtm.tif` i `dsm.tif`). Jeśli SfM jest już policzone bez nich, dogeneruj
+same DEM-y bez ponownego SfM:
+
+```powershell
+docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --project-path /datasets --rerun-from odm_dem --dtm --dsm --dem-resolution 10
 ```
 
 Wyjaśnienie flag:

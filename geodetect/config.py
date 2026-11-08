@@ -25,6 +25,7 @@ class DemConfig:
     raster_path: Optional[Path] = None
     gugik_url: str = DEFAULT_GUGIK_NMT_URL
     timeout_s: float = 10.0
+    cache_path: Optional[Path] = None  # JSON z probkami GUGiK (np. output/cache/gugik_nmt.json)
 
 
 @dataclass
@@ -64,6 +65,37 @@ class AggregateConfig:
     weights: str = "equal"
 
 
+Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment")
+
+
+@dataclass
+class ZAnchorConfig:
+    """Kalibracja wysokosci: H [m npm] = h_ODM + z_offset. Potensic zapisuje GPS Altitude
+    jako AGL od punktu startu, wiec h z ODM nie jest wysokoscia npm.
+
+    mode:
+      agl_assumption — z_offset = NMT(mediana xy kamer) + agl_m - srednia h kamer (fallback),
+      ground_frame   — klatka zrobiona na ziemi w punkcie startu (`image`):
+                       z_offset = NMT(xy) + lens_height_m - h kamery anchora,
+      dem_alignment  — dopasowanie DEM z ODM (odm_dtm / odm_dsm) do NMT:
+                       z_offset = mediana(NMT - DEM_ODM) w punktach otwartego terenu.
+    Diagnostyka multiview_check (geodetect.zcal.multiview_z_scan) nie jest trybem kalibracji.
+    """
+    mode: str = "agl_assumption"
+    agl_m: float = 45.0
+    # ground_frame
+    image: Optional[str] = None
+    lens_height_m: float = 0.15
+    # dem_alignment (None = odm_dir/odm_dem/dtm.tif i dsm.tif)
+    odm_dtm: Optional[Path] = None
+    odm_dsm: Optional[Path] = None
+    n_samples: int = 300
+    buffer_m: float = 10.0          # odsuniecie probek od krawedzi DEM ODM
+    max_dsm_dtm_m: float = 0.5      # gdy sa oba DEM-y: tylko otwarty teren
+    apply_tilt: bool = False        # stosowac takze dopasowana plaszczyzne (domyslnie tylko offset)
+    seed: int = 0
+
+
 @dataclass
 class PipelineConfig:
     photos_dir: Path = Path("zdjecia")
@@ -71,14 +103,12 @@ class PipelineConfig:
     model_path: Path = Path("LudzieiNamioty.pt")
     output_dir: Path = Path("output")
     images: list[str] = field(default_factory=lambda: ["SING0316.JPG"])
-    # Zalozona wysokosc lotu nad terenem [m] — uzywana do kalibracji Z,
-    # bo Potensic zapisuje GPS Altitude jako AGL od punktu startu (nie npm).
-    agl_fallback_m: float = 45.0
     dem: DemConfig = field(default_factory=DemConfig)
     detect: DetectConfig = field(default_factory=DetectConfig)
     raycast: RaycastConfig = field(default_factory=RaycastConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     aggregate: AggregateConfig = field(default_factory=AggregateConfig)
+    z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
 
     # ── pochodne sciezki ODM ──
     @property
@@ -89,6 +119,14 @@ class PipelineConfig:
         opensfm = self.odm_dir / "opensfm"
         topo = opensfm / "reconstruction.topocentric.json"
         return topo if topo.exists() else opensfm / "reconstruction.json"
+
+    @property
+    def odm_dtm_path(self) -> Path:
+        return self.z_anchor.odm_dtm or self.odm_dir / "odm_dem" / "dtm.tif"
+
+    @property
+    def odm_dsm_path(self) -> Path:
+        return self.z_anchor.odm_dsm or self.odm_dir / "odm_dem" / "dsm.tif"
 
     @property
     def reference_lla_path(self) -> Path:
@@ -130,12 +168,16 @@ class PipelineConfig:
         self.model_path = res(self.model_path)
         self.output_dir = res(self.output_dir)
         self.dem.raster_path = res(self.dem.raster_path)
+        self.dem.cache_path = res(self.dem.cache_path)
+        self.z_anchor.odm_dtm = res(self.z_anchor.odm_dtm)
+        self.z_anchor.odm_dsm = res(self.z_anchor.odm_dsm)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
-_PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path"}
+_PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
+                "odm_dtm", "odm_dsm"}
 _NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
-           "filters": FilterConfig, "aggregate": AggregateConfig}
+           "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig}
 
 
 def _build(cls, data: dict[str, Any]):
