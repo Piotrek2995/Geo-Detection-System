@@ -1,7 +1,9 @@
-"""Ray casting: piksel -> promien w lokalnym ENU -> przeciecie z DEM.
+"""Ray casting: piksel -> promien w lokalnym ENU -> PIERWSZE przeciecie z powierzchnia.
 
-Promien liczony jest w ENU (dokladnie w ukladzie rekonstrukcji ODM). W kazdym kroku
-punkt promienia przeliczamy scisle do EPSG:2180 (EnuFrame) i tam probkujemy DEM.
+Promien liczony jest w ENU (uklad rekonstrukcji ODM). Punkty promienia przeliczamy scisle
+(EnuFrame) do ukladu powierzchni i porownujemy wysokosci w ukladzie, ktory powierzchnia
+deklaruje: "npm" -> H = h_ODM + z_offset (+tilt), "odm_local" -> h_ODM bez z_offset.
+Probkowanie wsadowe: `chunk` punktow promienia na raz.
 """
 
 from __future__ import annotations
@@ -11,11 +13,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
+from pyproj import CRS, Transformer
 
 from .config import RaycastConfig
-from .dem import DemSampler
-from .geo import EnuFrame
+from .geo import EnuFrame, transform
 from .odm import CameraEO, CameraIO
+from .surface import VERTICAL_NPM, VERTICAL_ODM, Surface, as_surface
 
 
 @dataclass
@@ -23,10 +26,18 @@ class RayHit:
     enu: np.ndarray            # (3,) punkt trafienia w lokalnym ENU
     x_2180: float              # easting
     y_2180: float              # northing
-    h: float                   # [m npm] = wysokosc DEM w punkcie trafienia (z dokl. bisekcji)
+    h: float                   # [m npm] wysokosc punktu trafienia (h_ODM + z_offset)
     lon: float
     lat: float
     range_m: float             # odleglosc kamera -> punkt
+    surface: str = ""          # zrodlo powierzchni (cfg.surface.source)
+    surface_h: float = float("nan")    # wartosc powierzchni w punkcie (w jej ukladzie wysokosci)
+    ground_h: Optional[float] = None   # NMT [m npm] w tym punkcie (dla NMPT/DSM), jesli dostepny
+
+    @property
+    def above_ground_m(self) -> Optional[float]:
+        """Wysokosc trafienia nad NMT (pokrycie/obiekt) — tylko gdy znany ground_h."""
+        return None if self.ground_h is None else self.h - self.ground_h
 
 
 def pixel_to_ray(uv: tuple[float, float], io: CameraIO, eo: CameraEO
@@ -39,47 +50,88 @@ def pixel_to_ray(uv: tuple[float, float], io: CameraIO, eo: CameraEO
     return eo.C_enu.copy(), d_world / np.linalg.norm(d_world)
 
 
-def raycast(origin: np.ndarray, direction: np.ndarray, dem: DemSampler, frame: EnuFrame,
-            cfg: RaycastConfig) -> Optional[RayHit]:
-    """Marsz po promieniu co cfg.step_m + bisekcja. None, gdy brak przeciecia.
+class SurfaceProjector:
+    """Punkty ENU -> wspolrzedne powierzchni + wysokosc do porownania z jej wartosciami."""
 
-    Promien musi isc w dol (direction[2] < 0); dla wiekszych odleglosci od originu
-    "w dol" w ENU ≈ w dol lokalnie, bo krzywizna na setkach metrow jest pomijalna.
+    def __init__(self, frame: EnuFrame, surface: Surface):
+        if surface.vertical not in (VERTICAL_NPM, VERTICAL_ODM):
+            raise ValueError(f"Nieznany uklad wysokosci powierzchni: {surface.vertical!r}")
+        self.frame = frame
+        self.surface = surface
+        self._is_2180 = CRS.from_user_input(surface.crs) == CRS.from_epsg(2180)
+        self._to_surface = None if self._is_2180 else \
+            Transformer.from_crs("EPSG:4326", surface.crs, always_xy=True)
+
+    def project(self, P: np.ndarray):
+        """P (n,3) ENU -> (sx, sy, H_cmp, x_2180, y_2180, H_npm, lon, lat)."""
+        e, n, u = (np.ascontiguousarray(P[:, k]) for k in range(3))
+        lon, lat, h = self.frame.enu_to_geodetic(e, n, u)
+        lon, lat, h = np.asarray(lon), np.asarray(lat), np.asarray(h)
+        x, y = self.frame.lonlat_to_puwg92(lon, lat)
+        x, y = np.asarray(x), np.asarray(y)
+        H_npm = self.frame.npm_height(h, x, y)
+        sx, sy = (x, y) if self._is_2180 else transform(self._to_surface, lon, lat)
+        H_cmp = H_npm if self.surface.vertical == VERTICAL_NPM else h
+        return np.asarray(sx), np.asarray(sy), H_cmp, x, y, H_npm, lon, lat
+
+    def height_above(self, origin: np.ndarray, direction: np.ndarray, ts: np.ndarray) -> np.ndarray:
+        """Wysokosc promienia nad powierzchnia w parametrach t (NaN = brak danych)."""
+        P = origin[None, :] + ts[:, None] * direction[None, :]
+        sx, sy, H_cmp, *_ = self.project(P)
+        return H_cmp - self.surface.sample_many(sx, sy)
+
+
+def raycast(origin: np.ndarray, direction: np.ndarray, surface, frame: EnuFrame,
+            cfg: RaycastConfig) -> Optional[RayHit]:
+    """Pierwsze przeciecie promienia z powierzchnia (marsz + bisekcja); None, gdy brak.
+
+    `surface`: Surface albo punktowy DemSampler w EPSG:2180/npm (adapter as_surface).
+    Krok: cfg.step_for(surface.resolution_m) — dla rastrow nie wiekszy niz piksel,
+    zeby nie przeskoczyc cienkiej przeszkody (drzewo, krawedz dachu) na NMPT/DSM.
+    Promien musi isc w dol (direction[2] < 0).
     """
+    surface = as_surface(surface)
     if direction[2] >= 0:
         return None
-
-    def height_above_dem(t: float) -> Optional[float]:
-        p = origin + t * direction
-        x, y, h = frame.enu_to_puwg92(p[0], p[1], p[2])
-        z_dem = dem.sample(x, y)
-        return None if z_dem is None else h - z_dem  # >0 nad terenem
+    proj = SurfaceProjector(frame, surface)
+    step = cfg.step_for(surface.resolution_m)
+    chunk = cfg.rest_chunk if surface.resolution_m is None else cfg.chunk
+    ts_all = np.arange(cfg.t_min_m, cfg.t_max_m + 1e-9, step)
 
     prev_t: Optional[float] = None
-    prev_diff: Optional[float] = None
-    t = cfg.t_min_m
-    while t <= cfg.t_max_m:
-        diff = height_above_dem(t)
-        if diff is not None:
-            if prev_diff is not None and diff <= 0 < prev_diff:
-                lo, hi = prev_t, t
-                for _ in range(cfg.bisect_iters):
-                    mid = (lo + hi) / 2.0
-                    dm = height_above_dem(mid)
-                    if dm is None:
-                        break
-                    if dm > 0:
-                        lo = mid
-                    else:
-                        hi = mid
-                return _make_hit(origin, direction, (lo + hi) / 2.0, frame)
-            prev_t, prev_diff = t, diff
-        t += cfg.step_m
+    prev_d: Optional[float] = None
+    for i in range(0, len(ts_all), chunk):
+        ts = ts_all[i:i + chunk]
+        diffs = proj.height_above(origin, direction, ts)
+        for t, d in zip(ts, diffs):
+            if np.isnan(d):
+                continue
+            if prev_d is not None and d <= 0 < prev_d:
+                return _bisect(proj, origin, direction, prev_t, float(t), cfg.bisect_iters)
+            prev_t, prev_d = float(t), float(d)
     return None
 
 
-def _make_hit(origin: np.ndarray, direction: np.ndarray, t: float, frame: EnuFrame) -> RayHit:
+def _bisect(proj: SurfaceProjector, origin, direction, lo: float, hi: float,
+            iters: int) -> RayHit:
+    for _ in range(iters):
+        mid = (lo + hi) / 2.0
+        dm = proj.height_above(origin, direction, np.array([mid]))[0]
+        if np.isnan(dm):
+            break
+        if dm > 0:
+            lo = mid
+        else:
+            hi = mid
+    # `hi` = pierwszy punkt na/pod powierzchnia (blad <= krok/2^iters). Przy pionowym licu
+    # (sciana, krawedz dachu na NMPT/DSM) srodek przedzialu moglby wypasc jeszcze nad gruntem
+    # przed przeszkoda i zwrocic surface_h gruntu zamiast przeszkody.
+    return _make_hit(proj, origin, direction, hi)
+
+
+def _make_hit(proj: SurfaceProjector, origin, direction, t: float) -> RayHit:
     p = origin + t * direction
-    x, y, h = frame.enu_to_puwg92(p[0], p[1], p[2])
-    lon, lat = frame.puwg92_to_lonlat(x, y)
-    return RayHit(p, float(x), float(y), float(h), float(lon), float(lat), float(t))
+    sx, sy, _, x, y, H, lon, lat = proj.project(p[None, :])
+    z_surf = float(proj.surface.sample_many(sx, sy)[0])
+    return RayHit(p, float(x[0]), float(y[0]), float(H[0]), float(lon[0]), float(lat[0]),
+                  float(t), proj.surface.name, z_surf)

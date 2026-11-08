@@ -23,11 +23,33 @@ detect:
   classes: null               # null = wszystkie; np. [namiot, people]
   device: null                # null = auto; np. "0" (GPU) lub "cpu"
 
+# Ray casting: marsz po promieniu + bisekcja na PIERWSZYM przecieciu z powierzchnia.
+# Krok: step_m dla REST (brak rozdzielczosci); dla rastrow min(step_m,
+# rozdzielczosc * raster_step_factor) — zeby nie przeskoczyc cienkiej przeszkody.
 raycast:
   step_m: 5.0
+  raster_step_factor: 1.0
   t_min_m: 0.5
   t_max_m: 800.0
   bisect_iters: 25
+  chunk: 64                   # punkty promienia probkowane wsadowo (rastry)
+  rest_chunk: 8               # j.w. dla REST GUGiK (1 zapytanie GetHByPointList na paczke)
+
+# Powierzchnia, na ktora rzutujemy promienie (patrz README, "Zrodla powierzchni"):
+#   nmt_gugik_rest — NMT 1 m z REST GUGiK (grunt, npm), bez pobierania plikow,
+#   nmt_local      — arkusze NMT z geoportalu w nmt_dir (GeoTIFF/ASC/XYZ, mozaika, npm),
+#   nmpt_local     — arkusze NMPT (pokrycie: drzewa, dachy) w nmpt_dir (REST nie ma NMPT),
+#   odm_dsm        — DSM z ODM (EPSG:32634, wysokosci ODM -> porownanie BEZ z_offset).
+# Kalibracja Z (z_anchor) jest liczona zawsze wzgledem NMT z sekcji `dem`, niezaleznie
+# od tej sekcji (decyzja metodyczna — README).
+surface:
+  source: nmt_gugik_rest
+  nmt_dir: data/nmt
+  nmpt_dir: data/nmpt
+  odm_dsm: null               # null = odm_project/odm_dem/dsm.tif
+  interpolation: bilinear     # bilinear | nearest
+  default_crs: EPSG:2180      # dla ASC bez .prj i XYZ (arkusze GUGiK: PUWG 1992)
+  area_buffer_m: 300.0        # mozaika przycinana do bbox kamer + bufor
 
 # Filtry pojedynczych detekcji. Odrzucone zostaja w detections.geojson z polem
 # rejected_reason, ale nie wchodza do agregacji. null / false = filtr wylaczony.

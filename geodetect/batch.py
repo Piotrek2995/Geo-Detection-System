@@ -55,12 +55,15 @@ def summary_text(batch: BatchResult) -> str:
     lines = []
     if batch.z_calibration is not None:
         lines.append(f"Kalibracja Z — {batch.z_calibration.describe()}")
+    surfaces = sorted({gd.hit.surface for gd in batch.detections if gd.hit.surface})
+    if surfaces:
+        lines.append(f"Powierzchnia ray castingu: {', '.join(surfaces)}")
     lines.append(f"Zdjecia przetworzone: {len(batch.images)}, pominiete: {len(batch.skipped)}")
     for name, reason in sorted(batch.skipped.items()):
         lines.append(f"  pominiete {name}: {reason}")
     lines.append(f"Detekcje: {len(batch.detections)} z georeferencja "
                  f"(przyjete {len(batch.accepted)}, odrzucone {len(batch.rejected)}), "
-                 f"bez przeciecia z DEM: {len(batch.misses)}")
+                 f"bez przeciecia z powierzchnia: {len(batch.misses)}")
     for reason, n in Counter(gd.rejected_reason for gd in batch.rejected).most_common():
         lines.append(f"  odrzucone [{reason}]: {n}")
     n_border = sum(gd.touches_border for gd in batch.detections)

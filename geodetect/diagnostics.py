@@ -108,6 +108,7 @@ def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 1
     miary jakosci, bylaby kolowa. Sluzy jako niezalezna kontrola trybu dem_alignment.
     Kierunki promieni nie zaleza od z_offset, wiec probki DEM wzdluz promieni sa w wiekszosci
     wspolne (cache)."""
+    surface = getattr(ctx, "ray_surface", None) or ctx.dem
     objs = static_objects(batch, eps_m, cls_name, min_views)
     members = [[gd for gd in batch.detections if gd.object_id == o.object_id] for o in objs]
     rays = []
@@ -129,7 +130,7 @@ def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 1
         for g_rays in rays:
             pts = []
             for origin, direction in g_rays:
-                hit = raycast(origin, direction, ctx.dem, frame, ctx.config.raycast)
+                hit = raycast(origin, direction, surface, frame, ctx.config.raycast)
                 if hit is not None:
                     pts.append((hit.x_2180, hit.y_2180))
             if len(pts) >= 2:

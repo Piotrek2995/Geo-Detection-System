@@ -39,11 +39,41 @@ class DetectConfig:
 
 @dataclass
 class RaycastConfig:
-    """Marsz po promieniu co `step_m` od `t_min_m` do `t_max_m` + bisekcja."""
+    """Marsz po promieniu od `t_min_m` do `t_max_m` + bisekcja na pierwszym przecieciu.
+
+    Krok: `step_m` dla zrodel bez rozdzielczosci (REST, punktowe), a dla rastrow
+    rozdzielczosc * `raster_step_factor` (<= 1, zeby nie przeskoczyc cienkiej przeszkody
+    na NMPT/DSM). Punkty promienia probkowane wsadowo po `chunk` krokow."""
     step_m: float = 5.0
+    raster_step_factor: float = 1.0
     t_min_m: float = 0.5
     t_max_m: float = 800.0
     bisect_iters: int = 25
+    chunk: int = 64
+    rest_chunk: int = 8           # dla REST mniejsze paczki (mniej zapytan za trafieniem)
+
+    def step_for(self, resolution_m: Optional[float]) -> float:
+        if resolution_m is None:
+            return self.step_m
+        return min(self.step_m, resolution_m * self.raster_step_factor)
+
+
+SURFACE_SOURCES = ("nmt_gugik_rest", "nmt_local", "nmpt_local", "odm_dsm")
+
+
+@dataclass
+class SurfaceConfig:
+    """Powierzchnia, na ktora rzutujemy promienie (ray casting).
+
+    source: nmt_gugik_rest | nmt_local | nmpt_local | odm_dsm (opis w geodetect/surface.py).
+    Kalibracja Z (z_anchor) NIE zalezy od tej sekcji — zawsze wzgledem NMT z sekcji `dem`."""
+    source: str = "nmt_gugik_rest"
+    nmt_dir: Path = Path("data/nmt")
+    nmpt_dir: Path = Path("data/nmpt")
+    odm_dsm: Optional[Path] = None           # None = odm_dir/odm_dem/dsm.tif
+    interpolation: str = "bilinear"          # nearest | bilinear
+    default_crs: str = "EPSG:2180"           # dla plikow bez CRS (ASC bez .prj, XYZ)
+    area_buffer_m: float = 300.0             # mozaika: bbox kamer + bufor
 
 
 @dataclass
@@ -109,6 +139,7 @@ class PipelineConfig:
     filters: FilterConfig = field(default_factory=FilterConfig)
     aggregate: AggregateConfig = field(default_factory=AggregateConfig)
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
+    surface: SurfaceConfig = field(default_factory=SurfaceConfig)
 
     # ── pochodne sciezki ODM ──
     @property
@@ -171,13 +202,17 @@ class PipelineConfig:
         self.dem.cache_path = res(self.dem.cache_path)
         self.z_anchor.odm_dtm = res(self.z_anchor.odm_dtm)
         self.z_anchor.odm_dsm = res(self.z_anchor.odm_dsm)
+        self.surface.nmt_dir = res(self.surface.nmt_dir)
+        self.surface.nmpt_dir = res(self.surface.nmpt_dir)
+        self.surface.odm_dsm = res(self.surface.odm_dsm)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
-                "odm_dtm", "odm_dsm"}
+                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir"}
 _NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
-           "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig}
+           "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
+           "surface": SurfaceConfig}
 
 
 def _build(cls, data: dict[str, Any]):

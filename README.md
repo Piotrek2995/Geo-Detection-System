@@ -67,7 +67,7 @@ export_all(batch, cfg.output_dir)
 
 | Plik | Zawartość |
 |---|---|
-| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `conf`, `object_id`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, piksel, bbox |
+| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `conf`, `object_id`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, `surface`, `surface_h`, `ground_h`, `above_ground_m`, piksel, bbox |
 | `objects.geojson` | obiekty zagregowane: `n_views`, `images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `mean_incidence_deg`, `mean_range_m`, `duplicate_images` |
 | `objects.csv` | to samo co `objects.geojson` + `lon`, `lat` |
 | `detections_map.html` | mapa folium z warstwami: kamery, detekcje, obiekty, linie detekcja→obiekt, odrzucone; popupy z atrybutami |
@@ -106,6 +106,62 @@ jako niezależna kontrola, a nie do kalibracji wyników, bo ten sam rozrzut jest
 miarą jakości. Optimum jest zaniżone o wysokość punktu reprezentatywnego nad gruntem
 (środek bboxa).
 
+### Źródła powierzchni ray castingu (`surface`)
+
+Promień z piksela rzutujemy na powierzchnię wybraną w `surface.source` (albo `--surface`
+w CLI). Każde źródło deklaruje swój układ wysokości, a pipeline sam decyduje, czy
+porównywać wysokości z `z_offset`:
+
+| `source` | Dane | Układ XY | Wysokości | Krok marszu |
+|---|---|---|---|---|
+| `nmt_gugik_rest` | NMT 1 m z REST GUGiK (`GetHByPointList`, cache na dysku) | EPSG:2180 | npm (PL-EVRF2007-NH) | `raycast.step_m` (5 m) |
+| `nmt_local` | arkusze NMT z geoportalu w `data/nmt/` | EPSG:2180 | npm | rozdzielczość rastra |
+| `nmpt_local` | arkusze NMPT (pokrycie: drzewa, dachy) w `data/nmpt/` | EPSG:2180 | npm | rozdzielczość rastra |
+| `odm_dsm` | `odm_project/odm_dem/dsm.tif` | EPSG:32634 | **ODM lokalne** (bez `z_offset`) | rozdzielczość rastra (0,1 m) |
+
+REST GUGiK udostępnia tylko NMT, więc źródła `nmpt_gugik_rest` nie ma: NMPT trzeba pobrać
+jako arkusze. Lokalne arkusze mogą być w formacie GeoTIFF, ASC (ARC/INFO ASCII Grid) albo XYZ.
+Wszystkie pliki z folderu są łączone w pamięci w jedną mozaikę, przyciętą do bboxa kamer
+z buforem `area_buffer_m`. Arkusze muszą mieć tę samą rozdzielczość i CRS. Plik bez CRS
+(ASC bez `.prj`, XYZ) dostaje `default_crs` (EPSG:2180).
+
+Ray casting zwraca **pierwsze** przecięcie. Dla rastrów krok marszu nie przekracza piksela
+(`raster_step_factor`), więc cienka przeszkoda (drzewo, krawędź dachu) nie zostanie
+przeskoczona. Punkty promienia są próbkowane wsadowo (`raycast.chunk`, dla REST
+`rest_chunk` na jedno zapytanie listowe). Interpolacja `bilinear` przy brzegu danych
+przechodzi na najbliższy piksel, a nodata daje NaN i jest pomijane. Każde trafienie zapisuje
+w `detections.geojson` pola `surface` (źródło) i `surface_h` (wartość powierzchni). Dla
+NMPT/DSM dochodzą `ground_h` (NMT w tym samym punkcie) i `above_ground_m` (wysokość
+trafienia nad gruntem, czyli wysokość obiektu albo pokrycia).
+
+**Decyzja metodyczna: `z_offset` nie zależy od powierzchni.** `z_offset` jest liczony raz
+w `build_context` (`z_anchor`, domyślnie `dem_alignment`) względem NMT z sekcji `dem`.
+Zmiana `surface.source` go nie zmienia. Dzięki temu różnice między wynikami na NMT, NMPT
+i DSM wynikają wyłącznie z powierzchni, a nie z innej kalibracji. Dla `odm_dsm` porównanie
+wysokości odbywa się w układzie ODM (bez `z_offset`), ale wyniki (`altitude_m`) są nadal
+w m npm.
+
+#### Pobranie arkuszy NMT / NMPT (geoportal.gov.pl)
+
+1. [geoportal.gov.pl](https://www.geoportal.gov.pl) → *Pobieranie danych* (ikona strzałki)
+   → zaznacz warstwę *NMT* (potem osobno *NMPT*) → układ wysokości **PL-EVRF2007-NH**.
+2. Kliknij na mapie w obszar lotu i pobierz arkusze z listy (format **ASC** albo GeoTIFF,
+   układ PL-1992). Obszar lotu z buforem 100 m:
+   - EPSG:2180: `xmin=660111 ymin=664689 xmax=660577 ymax=665065` (ok. 466 × 376 m),
+   - WGS84: od 53.822146 N, 21.433191 E do 53.825376 N, 21.440458 E.
+   - godła 1:5000: **N-34-79-D-b-1-2** i **N-34-79-D-b-2-1** (1:10000: N-34-79-D-b-1,
+     N-34-79-D-b-2). Godła są wyliczone z podziału arkuszowego, więc sprawdź je na
+     skorowidzu w geoportalu. Nazwy plików mogą zawierać godło albo identyfikator zgłoszenia.
+3. Rozpakuj NMT do `data/nmt/`, a NMPT do `data/nmpt/` (`data/` jest w `.gitignore`).
+4. Sprawdź pokrycie, potem uruchom:
+
+```powershell
+python scripts/check_surface_coverage.py                  # zasięg, rozdzielczość, dziury
+python main.py --all --surface nmt_local --eps 10
+python main.py --all --surface nmpt_local --eps 10
+python scripts/surface_compare.py --eps 10                # tabela dla wszystkich źródeł
+```
+
 ## Testy
 
 ```powershell
@@ -134,7 +190,8 @@ geodetect/
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
   zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment
   detect.py     Detector (YOLO, model ładowany raz)
-  raycast.py    piksel -> promień w ENU, marsz + bisekcja na DEM
+  surface.py    powierzchnie ray castingu: REST GUGiK, mozaika arkuszy NMT/NMPT, DSM ODM
+  raycast.py    piksel -> promień w ENU, pierwsze przecięcie z powierzchnią (marsz + bisekcja)
   pipeline.py   build_context, run_single -> ImageResult (+ atrybuty i filtry detekcji)
   batch.py      run_batch -> BatchResult, summary_text
   aggregate.py  DBSCAN, AggregatedObject (pozycja ważona, widoki, rozrzut)
@@ -144,7 +201,9 @@ main.py         CLI
 config.yaml     przykładowa konfiguracja
 legacy/         zamrożony prototyp z raportu 1 (do porównań)
 scripts/        compare_legacy.py — prototyp vs pakiet; zcal_compare.py — tryby kalibracji Z;
-                pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM
+                pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM;
+                check_surface_coverage.py — pokrycie arkuszy NMT/NMPT;
+                surface_compare.py — zestawienie źródeł powierzchni
 tests/          testy jednostkowe
 ODM.md          instrukcja OpenDroneMap
 PROGRES/        raporty postępu

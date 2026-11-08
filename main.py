@@ -5,6 +5,7 @@ Przyklady:
     python main.py --all                         # wszystkie zdjecia z rekonstrukcji ODM
     python main.py --config config.yaml
     python main.py --image SING0304.JPG --image SING0316.JPG
+    python main.py --all --surface nmpt_local --eps 10
 
 Wyniki w <output_dir>: detections.geojson, objects.geojson, objects.csv,
 detections_map.html, spread.png.
@@ -17,7 +18,7 @@ import logging
 from pathlib import Path
 
 from geodetect.batch import run_batch, summary_text
-from geodetect.config import PipelineConfig
+from geodetect.config import SURFACE_SOURCES, PipelineConfig
 from geodetect.dem import GugikDem
 from geodetect.export import export_all
 from geodetect.pipeline import build_context
@@ -34,6 +35,10 @@ def parse_args() -> argparse.Namespace:
                    help="nazwa zdjecia (mozna podac wielokrotnie); nadpisuje 'images' z configu")
     g.add_argument("--all", action="store_true",
                    help="wszystkie zdjecia z rekonstrukcji ODM")
+    p.add_argument("--surface", choices=SURFACE_SOURCES, default=None,
+                   help="powierzchnia ray castingu; nadpisuje surface.source z configu")
+    p.add_argument("--eps", type=float, default=None,
+                   help="promien DBSCAN [m]; nadpisuje aggregate.eps_m z configu")
     p.add_argument("-v", "--verbose", action="store_true", help="logi DEBUG")
     return p.parse_args()
 
@@ -58,6 +63,10 @@ def main() -> None:
     cfg = load_config(args.config)
     if args.image:
         cfg.images = args.image
+    if args.surface:
+        cfg.surface.source = args.surface
+    if args.eps is not None:
+        cfg.aggregate.eps_m = args.eps
 
     ctx = build_context(cfg)
     batch = run_batch(cfg, ctx, images=None if args.all else cfg.images,

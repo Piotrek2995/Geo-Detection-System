@@ -18,8 +18,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 from pyproj import Transformer
 from pyproj.enums import TransformDirection
+
+
+def transform(tr: Transformer, *coords, **kw):
+    """Transformer.transform odporny na tablice 1-elementowe: pyproj kieruje je na sciezke
+    skalarna, co w nowszym NumPy daje DeprecationWarning (a w przyszlosci blad)."""
+    arrs = [np.asarray(c) for c in coords]
+    if any(a.ndim > 0 for a in arrs) and all(a.size == 1 for a in arrs):
+        out = tr.transform(*(float(a.reshape(-1)[0]) for a in arrs), **kw)
+        return tuple(np.array([v]) for v in out)
+    return tr.transform(*coords, **kw)
 
 
 @dataclass(frozen=True)
@@ -67,22 +78,26 @@ class EnuFrame:
 
     def enu_to_geodetic(self, e, n, u):
         """ENU [m] -> (lon, lat, h_ellipsoidal). Przyjmuje skalary lub tablice."""
-        return self._enu.transform(e, n, u, direction=TransformDirection.INVERSE)
+        return transform(self._enu, e, n, u, direction=TransformDirection.INVERSE)
 
     def geodetic_to_enu(self, lon, lat, h):
-        return self._enu.transform(lon, lat, h)
+        return transform(self._enu, lon, lat, h)
 
     def enu_to_puwg92(self, e, n, u):
         """ENU [m] -> (x=easting, y=northing) EPSG:2180 i H [m npm]."""
         lon, lat, h = self.enu_to_geodetic(e, n, u)
-        x, y = self._to_2180.transform(lon, lat)
+        x, y = transform(self._to_2180, lon, lat)
+        return x, y, self.npm_height(h, x, y)
+
+    def npm_height(self, h, x, y):
+        """Wysokosc ODM h -> npm w punkcie (x, y) EPSG:2180 (z_offset + ewentualny tilt)."""
         H = h + self.z_offset
         if self.tilt is not None:
             H = H + self.tilt(x, y)
-        return x, y, H
+        return H
 
     def puwg92_to_lonlat(self, x, y):
-        return self._from_2180.transform(x, y)
+        return transform(self._from_2180, x, y)
 
     def lonlat_to_puwg92(self, lon, lat):
-        return self._to_2180.transform(lon, lat)
+        return transform(self._to_2180, lon, lat)

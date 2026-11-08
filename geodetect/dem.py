@@ -79,6 +79,53 @@ class GugikDem:
             self.save()
         return z
 
+    def sample_many(self, x, y, batch_size: int = 100) -> "np.ndarray":
+        """Wiele punktow naraz (NaN = brak danych). Brakujace w cache odpytywane wsadowo
+        przez GetHByPointList, w punktach zaokraglonych do 1 m (klucz cache)."""
+        import numpy as np
+        x, y = np.atleast_1d(x), np.atleast_1d(y)
+        keys = [(int(round(xi)), int(round(yi))) for xi, yi in zip(x, y)]
+        todo = sorted({k for k in keys if k not in self._cache})
+        self.hits += len(keys) - len(todo)
+        self.misses += len(todo)
+        for i in range(0, len(todo), batch_size):
+            chunk = todo[i:i + batch_size]
+            try:
+                values = self._query_list(chunk)
+            except _TransientError:
+                continue  # nie cache'ujemy — te punkty zostana NaN w tym wywolaniu
+            for k, z in zip(chunk, values):
+                self._cache[k] = z
+            self._unsaved += len(chunk)
+        if self._unsaved >= self.autosave_every:
+            self.save()
+        return np.array([np.nan if self._cache.get(k) is None else self._cache[k] for k in keys])
+
+    def _query_list(self, keys: list[tuple[int, int]]) -> list[Optional[float]]:
+        # GetHByPointList: lista "x y" = "northing easting", odpowiedz "x y h,x y h,..."
+        pts = ",".join(f"{n} {e}" for e, n in keys)
+        try:
+            r = self.session.get(self.url, params={"request": "GetHByPointList", "list": pts},
+                                 timeout=self.timeout)
+        except requests.RequestException as e:
+            log.warning("GUGiK NMT: blad zapytania listy (%d pkt): %s", len(keys), e)
+            raise _TransientError from e
+        if r.status_code >= 500 or r.status_code == 429:
+            log.warning("GUGiK NMT: HTTP %d (lista %d pkt)", r.status_code, len(keys))
+            raise _TransientError
+        items = [s.split() for s in r.text.strip().split(",")] if r.ok else []
+        if len(items) != len(keys) or any(len(it) != 3 for it in items):
+            # nieoczekiwana odpowiedz — punkt po punkcie
+            return [self._query(e, n) for e, n in keys]
+        out = []
+        for it in items:
+            try:
+                z = float(it[2])
+            except ValueError:
+                z = 0.0
+            out.append(None if z == 0.0 else z)
+        return out
+
     def _query(self, easting: float, northing: float) -> Optional[float]:
         try:
             # GetHByXY: x = northing, y = easting (konwencja geodezyjna PUWG 1992).

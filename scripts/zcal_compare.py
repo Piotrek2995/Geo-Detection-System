@@ -85,7 +85,7 @@ def evaluate(name: str, ctx: PipelineContext, cfg: PipelineConfig) -> ModeResult
 def context_with_offset(ctx: PipelineContext, offset: float, label: str) -> PipelineContext:
     return PipelineContext(ctx.config, ctx.dem, ctx.reconstruction,
                            ctx.frame.with_z_offset(offset), ZCalibration(offset, label),
-                           ctx.detector)
+                           ctx.detector, ctx.surface)
 
 
 # ───────────── wykresy ─────────────

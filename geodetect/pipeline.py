@@ -19,19 +19,28 @@ from .exif import GpsFix, read_gps
 from .geo import EnuFrame
 from .odm import CameraEO, CameraIO, OdmReconstruction
 from .raycast import RayHit, pixel_to_ray, raycast
+from .surface import Surface, area_bounds_2180, as_surface, build_surface
 from .zcal import ZCalibration, calibrate_z
 
 log = logging.getLogger(__name__)
+
+# Powierzchnie pokrycia terenu (nie gruntu): dla nich liczymy wysokosc nad NMT.
+COVER_SURFACES = ("nmpt_local", "odm_dsm")
 
 
 @dataclass
 class PipelineContext:
     config: PipelineConfig
-    dem: DemSampler
+    dem: DemSampler            # NMT referencyjny (sekcja `dem`): kalibracja Z, wysokosc gruntu
     reconstruction: OdmReconstruction
     frame: EnuFrame            # z ustawionym z_offset
     z_calibration: ZCalibration
     detector: Detector
+    surface: Optional[Surface] = None   # powierzchnia ray castingu; None = `dem`
+
+    @property
+    def ray_surface(self) -> Surface:
+        return self.surface if self.surface is not None else as_surface(self.dem)
 
 
 @dataclass
@@ -76,13 +85,22 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -
     dem = resolve_dem(config.dem)
     rec = OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
     base_frame = EnuFrame(rec.ref)
+    # DECYZJA METODYCZNA: z_offset liczony raz, wzgledem NMT referencyjnego (sekcja `dem`),
+    # niezaleznie od powierzchni ray castingu (sekcja `surface`). Gdyby kalibracja zalezala
+    # od wybranej powierzchni (NMT / NMPT / DSM ODM), porownanie powierzchni mieszaloby sie
+    # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
     z_cal = calibrate_z(config, dem, rec, base_frame)
     log.info("Kalibracja Z — %s", z_cal.describe())
+    cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
+                     for n in rec.image_names])
+    surface = build_surface(config, area_bounds_2180(config, cams), ref_dem=dem)
+    log.info("Powierzchnia ray castingu: %s (uklad wysokosci %s, krok %.2f m)", surface.name,
+             surface.vertical, config.raycast.step_for(surface.resolution_m))
     if detector is None:
         detector = Detector(config.model_path, conf=config.detect.conf,
                             classes=config.detect.classes, device=config.detect.device)
     return PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
-                           z_cal, detector)
+                           z_cal, detector, surface)
 
 
 def run_single(config: PipelineConfig, image_name: str,
@@ -102,12 +120,13 @@ def run_single(config: PipelineConfig, image_name: str,
     for det in ctx.detector.detect(image_path):
         uv = det.center
         origin, direction = pixel_to_ray(uv, io, eo)
-        hit = raycast(origin, direction, ctx.dem, ctx.frame, config.raycast)
+        hit = raycast(origin, direction, ctx.ray_surface, ctx.frame, config.raycast)
         if hit is None:
-            log.info("%s: %s u,v=(%.0f, %.0f) — brak przeciecia z DEM",
-                     image_name, det.cls_name, *uv)
+            log.info("%s: %s u,v=(%.0f, %.0f) — brak przeciecia z powierzchnia %s",
+                     image_name, det.cls_name, *uv, ctx.ray_surface.name)
             result.misses.append(det)
             continue
+        attach_ground_height(hit, ctx)
         incidence = float(np.degrees(np.arccos(np.clip(-direction[2], -1.0, 1.0))))
         gd = GeoDetection(image_name, det, uv, hit, incidence,
                           touches_border(det.bbox, io.width, io.height,
@@ -118,6 +137,18 @@ def run_single(config: PipelineConfig, image_name: str,
     log.info("%s: %d detekcji z georeferencja (%d odrzuconych), %d bez przeciecia",
              image_name, len(result.detections), n_rej, len(result.misses))
     return result
+
+
+def attach_ground_height(hit: RayHit, ctx: PipelineContext) -> None:
+    """Dla powierzchni pokrycia (NMPT, DSM ODM) zapisuje NMT [m npm] w punkcie trafienia,
+    zeby hit.above_ground_m dawalo wysokosc obiektu/pokrycia nad gruntem. Dla NMT pomijane
+    (trafienie jest na gruncie z definicji)."""
+    if hit.surface not in COVER_SURFACES:
+        return
+    try:
+        hit.ground_h = ctx.dem.sample(hit.x_2180, hit.y_2180)
+    except Exception as exc:  # NMT referencyjny niedostepny -> tylko brak tej informacji
+        log.warning("Brak NMT w (%.1f, %.1f): %s", hit.x_2180, hit.y_2180, exc)
 
 
 def touches_border(bbox: tuple[float, float, float, float], width: int, height: int,
