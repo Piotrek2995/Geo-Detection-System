@@ -81,6 +81,12 @@ class OdmReconstruction:
         if not reconstruction_path.exists():
             raise FileNotFoundError(
                 f"Brak {reconstruction_path}. Najpierw przepusc zdjecia przez ODM (ODM.md).")
+        if "topocentric" not in reconstruction_path.name:
+            log.warning("Brak reconstruction.topocentric.json — zakladam, ze %s jest w ukladzie "
+                        "topocentrycznym (starsze ODM). W nowszych ODM jest w UTM z offsetem!",
+                        reconstruction_path.name)
+        log.info("ODM: %s", reconstruction_path)
+        self.path = reconstruction_path
         rec = json.loads(reconstruction_path.read_text(encoding="utf-8"))[0]
         self.cameras: dict = rec["cameras"]
         self.shots: dict = rec["shots"]

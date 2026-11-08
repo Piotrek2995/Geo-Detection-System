@@ -109,7 +109,7 @@ PROGRES/        raporty postępu
 
 ## Konwencje (ważne)
 
-- **OpenSfM:** `rotation` to angle-axis, R: world→camera, `C = −Rᵀt`. Focal i principal
+- **OpenSfM:** czytamy `opensfm/reconstruction.topocentric.json` (topocentryczne ENU wokół `reference_lla`). Nowsze ODM zapisują `reconstruction.json` w układzie UTM z offsetem z `odm_georeferencing/coords.txt`, więc nie jest on topocentryczny (różnica 0,35° obrotu + skala UTM). `rotation` to angle-axis, R: world→camera, `C = −Rᵀt`. Focal i principal
   point są znormalizowane do max(w, h). „World” to topocentryczne ENU wokół `reference_lla`.
 - **ENU ≠ EPSG:2180.** Zbieżność południków PUWG 1992 w rejonie lotu wynosi ok. 1,97°,
   co daje ok. 3,4 cm błędu na każdy metr od originu ODM. Każdy punkt promienia jest więc

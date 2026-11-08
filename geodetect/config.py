@@ -83,7 +83,12 @@ class PipelineConfig:
     # ── pochodne sciezki ODM ──
     @property
     def reconstruction_path(self) -> Path:
-        return self.odm_dir / "opensfm" / "reconstruction.json"
+        """Rekonstrukcja w topocentrycznym ENU wokol reference_lla. Nowsze ODM eksportuja
+        reconstruction.json do ukladu UTM-z-offsetem (odm_georeferencing/coords.txt),
+        a wersje topocentryczna zostawiaja w reconstruction.topocentric.json."""
+        opensfm = self.odm_dir / "opensfm"
+        topo = opensfm / "reconstruction.topocentric.json"
+        return topo if topo.exists() else opensfm / "reconstruction.json"
 
     @property
     def reference_lla_path(self) -> Path:
