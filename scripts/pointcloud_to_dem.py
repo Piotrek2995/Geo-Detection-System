@@ -3,7 +3,7 @@
 Do uzycia, gdy ODM nie wygenerowal odm_dem/dtm.tif i dsm.tif (brak --dtm --dsm).
 Docelowo lepiej dogenerowac DEM w ODM (klasyfikacja gruntu SMRF):
     docker run --rm -v "${PWD}\\odm_project:/datasets/code" opendronemap/odm \\
-        --project-path /datasets --rerun-from odm_dem --dtm --dsm --dem-resolution 10
+        --project-path /datasets --rerun-from odm_georeferencing --dtm --dsm --dem-resolution 10
 
 Chmura w odm_filterpoints jest w ukladzie UTM z offsetem (odm_georeferencing/coords.txt,
 proj.txt), z ta sama osia Z co kamery ODM. Rasteryzacja na siatce `--res` m:

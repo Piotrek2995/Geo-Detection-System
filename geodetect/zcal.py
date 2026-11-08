@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 ODM_DEM_DOCKER_CMD = (
     'docker run --rm -v "${PWD}\\odm_project:/datasets/code" opendronemap/odm '
-    "--project-path /datasets --rerun-from odm_dem --dtm --dsm --dem-resolution 10"
+    "--project-path /datasets --rerun-from odm_georeferencing --dtm --dsm --dem-resolution 10"
 )
 
 
@@ -249,7 +249,10 @@ def dem_alignment(za: ZAnchorConfig, dtm_path: Path, dsm_path: Path, dem: DemSam
     if not (has_dtm or has_dsm):
         raise FileNotFoundError(
             f"z_anchor.mode=dem_alignment: brak DEM z ODM ({dtm_path}, {dsm_path}). "
-            f"Dogeneruj je bez ponownego SfM (PowerShell, katalog repo):\n  {ODM_DEM_DOCKER_CMD}")
+            f"Dogeneruj je bez ponownego SfM (PowerShell, katalog repo):\n  {ODM_DEM_DOCKER_CMD}\n"
+            f"Rerun od odm_georeferencing, bo tam jest klasyfikacja gruntu (SMRF) — bez niej DTM "
+            f"nie powstaje. Ewentualny blad ODM przy grafice raportu PDF na koncu nie wplywa "
+            f"na dtm.tif/dsm.tif.")
 
     xs, ys, h_odm, crs, layer, n_cand = sample_odm_dem(
         dtm_path if has_dtm else None, dsm_path if has_dsm else None,

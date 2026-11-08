@@ -67,11 +67,21 @@ docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --projec
 
 `--dtm --dsm` są potrzebne do kalibracji wysokości `z_anchor.mode: dem_alignment`
 (pliki `odm_dem/dtm.tif` i `dsm.tif`). Jeśli SfM jest już policzone bez nich, dogeneruj
-same DEM-y bez ponownego SfM:
+same DEM-y bez ponownego SfM, **od etapu `odm_georeferencing`**:
 
 ```powershell
-docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --project-path /datasets --rerun-from odm_dem --dtm --dsm --dem-resolution 10
+docker run --rm -v "${PWD}\odm_project:/datasets/code" opendronemap/odm --project-path /datasets --rerun-from odm_georeferencing --dtm --dsm --dem-resolution 10
 ```
+
+Dlaczego nie `--rerun-from odm_dem`: klasyfikacja gruntu (SMRF), z której powstaje DTM,
+wykonuje się w etapie `odm_georeferencing`. Bez niej chmura nie ma punktów klasy „grunt”,
+DTM nie powstaje, a ODM kończy się mylącym komunikatem o braku pamięci (kod 137;
+w logu `Point cloud bounds are [minx: 1.79e+308 ...]`). DSM powstaje w obu wariantach.
+
+Ten rerun może się zakończyć błędem w etapie `odm_report`, przy grafice do raportu PDF
+(`Cannot generate colored hillshade`, `numpy.core.multiarray failed to import`). To błąd
+ODM po stronie raportu. Nie wpływa na `odm_dem/dtm.tif` i `dsm.tif`, które są wtedy już
+kompletne.
 
 Wyjaśnienie flag:
 - `--rm` — usuń kontener po zakończeniu (nic nie zaśmieca).

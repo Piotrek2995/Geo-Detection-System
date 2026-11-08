@@ -153,7 +153,7 @@ class DemAlignmentTest(unittest.TestCase):
             self.assertAlmostEqual(h_odm + z.offset + z.tilt(x, y), self.nmt(x, y), places=3)
 
     def test_missing_dem_mentions_docker(self):
-        with self.assertRaisesRegex(FileNotFoundError, "--rerun-from odm_dem --dtm --dsm"):
+        with self.assertRaisesRegex(FileNotFoundError, "--rerun-from odm_georeferencing --dtm --dsm"):
             dem_alignment(ZAnchorConfig(), Path("nope/dtm.tif"), Path("nope/dsm.tif"), FlatDem(0))
 
     def test_fit_plane_ignores_outliers(self):
