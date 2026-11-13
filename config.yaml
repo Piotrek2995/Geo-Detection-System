@@ -51,6 +51,29 @@ surface:
   default_crs: EPSG:2180      # dla ASC bez .prj i XYZ (arkusze GUGiK: PUWG 1992)
   area_buffer_m: 300.0        # mozaika przycinana do bbox kamer + bufor
 
+# Punkt reprezentatywny detekcji — przez ktory piksel idzie promien (README, "Punkt
+# reprezentatywny"). Metody: bbox_center | bbox_bottom_center | mask_centroid |
+# mask_ground_contact | mask_footprint_median; mask_* uzywaja SAM (prompt = bbox YOLO).
+# per_class nadpisuje method dla klasy. Maska odrzucona -> bbox_center (adnotacja w wynikach).
+point:
+  # Domyslnie (wyniki scripts/point_compare.py): namioty bbox_center — najmniejszy rozrzut
+  # bez SAM; ludzie bbox_bottom_center — stopy to punkt na gruncie, a srodek bboxa stojacej
+  # osoby jest ~0.9 m nad nim (przesuniecie ~0.75 m wzdluz promienia).
+  method: bbox_center
+  per_class:
+    people: bbox_bottom_center
+  sam_model: sam2.1_b.pt            # lzejszy: mobile_sam.pt (pobierane automatycznie)
+  sam_device: null                  # null = GPU jesli dostepne
+  mask_cache_dir: output/cache/masks
+  min_area_ratio: 0.10              # maska / bbox ponizej -> too_small
+  max_area_ratio: 0.97              # powyzej i dotyka wszystkich krawedzi bboxa -> fills_bbox
+  min_largest_frac: 0.60            # najwieksza skladowa / maska ponizej -> fragmented
+  edge_tol_px: 2.0
+  min_offnadir_deg: 5.0             # ground_contact: blizej nadiru -> fallback mask_centroid
+  contact_band: 0.05
+  footprint_samples: 200
+  seed: 0
+
 # Filtry pojedynczych detekcji. Odrzucone zostaja w detections.geojson z polem
 # rejected_reason, ale nie wchodza do agregacji. null / false = filtr wylaczony.
 filters:

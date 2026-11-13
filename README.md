@@ -162,6 +162,57 @@ python main.py --all --surface nmpt_local --eps 10
 python scripts/surface_compare.py --eps 10                # tabela dla wszystkich źródeł
 ```
 
+### Punkt reprezentatywny (`point`)
+
+Promień idzie przez jeden piksel detekcji (albo przez wiele pikseli). Piksel wybiera
+`point.method`, a `point.per_class` pozwala nadpisać metodę dla wybranej klasy.
+
+| Metoda | Piksel | SAM |
+|---|---|---|
+| `bbox_center` | środek bboxa YOLO | nie |
+| `bbox_bottom_center` | środek dolnej krawędzi bboxa (dla ludzi: stopy) | nie |
+| `mask_centroid` | centroid maski | tak |
+| `mask_ground_contact` | styk maski z gruntem: skrajny punkt maski w kierunku punktu nadiru (zbiegu pionów) | tak |
+| `mask_footprint_median` | `footprint_samples` promieni przez piksele maski, mediana XY trafień | tak |
+
+- **Maski** liczy SAM z ultralytics (`point.sam_model`, domyślnie `sam2.1_b.pt`, lżejszy
+  `mobile_sam.pt`, oba pobierane automatycznie). Promptem jest bbox z YOLO. Maski trafiają
+  do cache w `output/cache/masks/` (klucz: zdjęcie + bbox + model). SAM ładuje się tylko
+  wtedy, gdy któraś metoda wymaga masek.
+- **Kontrola jakości** działa na największej spójnej składowej maski. Maskę odrzucają:
+  - pole maski / pole bboxa < `min_area_ratio` (`too_small`);
+  - maska dotyka wszystkich krawędzi bboxa i wypełnia go w ponad `max_area_ratio`
+    (`fills_bbox`);
+  - największa składowa to mniej niż `min_largest_frac` całej maski (`fragmented`).
+
+  Samo dotykanie wszystkich krawędzi nie jest błędem, bo bbox YOLO jest ciasny.
+- **Fallbacki:**
+  - brak maski albo maska odrzucona → `bbox_center`;
+  - `mask_ground_contact` dla obiektu bliżej nadiru niż `min_offnadir_deg` → `mask_centroid`
+    (pionowe krawędzie są wtedy niewidoczne, a kierunek „w dół” nieokreślony).
+
+  Każda detekcja ma w `detections.geojson` pola `point_method`, `point_used`,
+  `point_fallback`, `mask_area_ratio` i `n_rays`.
+
+Geometrię styku z gruntem opisuje docstring `geodetect/points.py`. Ocena metod:
+
+```powershell
+python scripts/point_compare.py                 # nmt_local, eps 10 m; --cold mierzy SAM bez cache
+```
+
+Skrypt zapisuje tabelę na stdout oraz pliki w `output/points/`: `spread_by_method.png`,
+`zoffset_by_method.png` i `preview_*.png` (bbox, maska, piksele każdej metody, kierunek pionu).
+
+**Wyniki (lot testowy).** Najmniejszy rozrzut namiotu dają metody przez środek bryły:
+`bbox_center` (RMS 0,39 m), `mask_footprint_median` (0,44 m) i `mask_centroid` (0,50 m).
+Metody „przy gruncie” pogarszają rozrzut do 1,4–1,8 m: `bbox_bottom_center` i
+`mask_ground_contact`. Dla rozciągłego obiektu styk z gruntem leży na **bliższej kamerze
+krawędzi podstawy**, a ta krawędź zmienia się z kierunkiem widoku. Błąd ma więc rząd
+połowy rzutu poziomego namiotu i jest większy niż błąd z wyniesienia środka.
+`multiview_check` przesuwa się wtedy z −0,5 m na +1,8…+2,2 m względem `dem_alignment`.
+Dlatego domyślnie namioty używają `bbox_center`, a ludzie `bbox_bottom_center`. Postać
+stojąca ma mały rzut poziomy, a środek jej bboxa jest ok. 0,9 m nad gruntem.
+
 ## Testy
 
 ```powershell
@@ -190,6 +241,8 @@ geodetect/
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
   zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment
   detect.py     Detector (YOLO, model ładowany raz)
+  points.py     punkt reprezentatywny detekcji (bbox / maska SAM), geometria punktu nadiru
+  segment.py    maski SAM (prompt = bbox), cache na dysku, kontrola jakości
   surface.py    powierzchnie ray castingu: REST GUGiK, mozaika arkuszy NMT/NMPT, DSM ODM
   raycast.py    piksel -> promień w ENU, pierwsze przecięcie z powierzchnią (marsz + bisekcja)
   pipeline.py   build_context, run_single -> ImageResult (+ atrybuty i filtry detekcji)
@@ -203,7 +256,8 @@ legacy/         zamrożony prototyp z raportu 1 (do porównań)
 scripts/        compare_legacy.py — prototyp vs pakiet; zcal_compare.py — tryby kalibracji Z;
                 pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM;
                 check_surface_coverage.py — pokrycie arkuszy NMT/NMPT;
-                surface_compare.py — zestawienie źródeł powierzchni
+                surface_compare.py — zestawienie źródeł powierzchni;
+                point_compare.py — ocena metod punktu reprezentatywnego
 tests/          testy jednostkowe
 ODM.md          instrukcja OpenDroneMap
 PROGRES/        raporty postępu

@@ -11,3 +11,5 @@ detections_map.html
 nmt/
 odm_project/
 data/
+sam*.pt
+mobile_sam.pt

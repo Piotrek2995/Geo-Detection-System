@@ -18,7 +18,9 @@ from .detect import Detection, Detector
 from .exif import GpsFix, read_gps
 from .geo import EnuFrame
 from .odm import CameraEO, CameraIO, OdmReconstruction
-from .raycast import RayHit, pixel_to_ray, raycast
+from .points import PointChoice, choose_point
+from .raycast import RayHit, median_hit, pixel_to_ray, raycast
+from .segment import Segmenter, clean_mask
 from .surface import Surface, area_bounds_2180, as_surface, build_surface
 from .zcal import ZCalibration, calibrate_z
 
@@ -37,6 +39,7 @@ class PipelineContext:
     z_calibration: ZCalibration
     detector: Detector
     surface: Optional[Surface] = None   # powierzchnia ray castingu; None = `dem`
+    segmenter: Optional[Segmenter] = None   # SAM, tworzony leniwie (tylko metody mask_*)
 
     @property
     def ray_surface(self) -> Surface:
@@ -57,12 +60,20 @@ class CameraPose:
 class GeoDetection:
     image_name: str
     detection: Detection
-    uv: tuple[float, float]    # piksel reprezentatywny (na razie srodek bboxa)
+    uv: tuple[float, float]    # piksel reprezentatywny (cfg.point; dla footprint: centroid)
     hit: RayHit
     incidence_deg: float       # kat promienia wzgledem pionu (0 = nadir)
     touches_border: bool       # bbox styka sie z krawedzia kadru (obiekt uciety)
     rejected_reason: Optional[str] = None   # None = przyjeta
     object_id: Optional[int] = None         # nadawane przy agregacji
+    point: Optional[PointChoice] = None     # metoda punktu, fallback, jakosc maski
+
+    @property
+    def ray_uvs(self) -> np.ndarray:
+        """Piksele, przez ktore ida promienie (footprint: wiele, inaczej jeden)."""
+        if self.point is not None and self.point.footprint_uvs is not None:
+            return self.point.footprint_uvs
+        return np.array([self.uv], dtype=np.float64)
 
     @property
     def accepted(self) -> bool:
@@ -82,6 +93,7 @@ class ImageResult:
 
 
 def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -> PipelineContext:
+    config.point.validate()
     dem = resolve_dem(config.dem)
     rec = OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
     base_frame = EnuFrame(rec.ref)
@@ -117,10 +129,12 @@ def run_single(config: PipelineConfig, image_name: str,
     log.info("%s: kamera EPSG:2180 = (%.2f, %.2f, %.2f)", image_name, cx, cy, ch)
 
     result = ImageResult(image_name, gps, io, eo, camera, ctx.z_calibration)
-    for det in ctx.detector.detect(image_path):
-        uv = det.center
+    dets = ctx.detector.detect(image_path)
+    choices = choose_points(ctx, image_path, dets, io, eo)
+    for det, choice in zip(dets, choices):
+        uv = choice.uv
         origin, direction = pixel_to_ray(uv, io, eo)
-        hit = raycast(origin, direction, ctx.ray_surface, ctx.frame, config.raycast)
+        hit = cast_point(ctx, choice, io, eo)
         if hit is None:
             log.info("%s: %s u,v=(%.0f, %.0f) — brak przeciecia z powierzchnia %s",
                      image_name, det.cls_name, *uv, ctx.ray_surface.name)
@@ -131,12 +145,58 @@ def run_single(config: PipelineConfig, image_name: str,
         gd = GeoDetection(image_name, det, uv, hit, incidence,
                           touches_border(det.bbox, io.width, io.height,
                                          config.filters.border_margin_px))
+        gd.point = choice
         gd.rejected_reason = rejection_reason(gd, config.filters)
         result.detections.append(gd)
     n_rej = sum(not gd.accepted for gd in result.detections)
     log.info("%s: %d detekcji z georeferencja (%d odrzuconych), %d bez przeciecia",
              image_name, len(result.detections), n_rej, len(result.misses))
     return result
+
+
+def choose_points(ctx: PipelineContext, image_path, dets: list[Detection], io: CameraIO,
+                  eo: CameraEO) -> list[PointChoice]:
+    """Punkt reprezentatywny kazdej detekcji wg cfg.point. Maski SAM liczone (lub brane
+    z cache) tylko dla detekcji, ktorych metoda ich wymaga."""
+    pc = ctx.config.point
+    methods = [pc.method_for(d.cls_name) for d in dets]
+    need = [i for i, m in enumerate(methods) if m.startswith("mask_")]
+    masks: dict[int, object] = {}
+    if need:
+        if ctx.segmenter is None:
+            ctx.segmenter = Segmenter(pc)
+        try:
+            got = ctx.segmenter.masks(image_path, [dets[i].bbox for i in need])
+        except Exception as exc:     # SAM niedostepny -> fallback per detekcja
+            log.warning("SAM: %s — fallback bbox_center", exc)
+            got = [None] * len(need)
+        masks = dict(zip(need, got))
+    out = []
+    for i, (det, m) in enumerate(zip(dets, methods)):
+        mask, quality = masks.get(i), None
+        if mask is not None:
+            mask, quality = clean_mask(mask, det.bbox, pc)
+        ch = choose_point(m, det.bbox, io, eo, pc, mask, quality)
+        if ch.fallback:
+            log.info("%s %s: %s -> %s (%s)", image_path.name, det.cls_name, ch.method, ch.used,
+                     ch.fallback)
+        out.append(ch)
+    return out
+
+
+def cast_point(ctx: PipelineContext, choice: PointChoice, io: CameraIO, eo: CameraEO
+               ) -> Optional[RayHit]:
+    """Ray casting piksela; dla mask_footprint_median wiele promieni -> mediana trafien."""
+    uvs = [choice.uv] if choice.footprint_uvs is None else choice.footprint_uvs
+    hits = []
+    for uv in uvs:
+        o, d = pixel_to_ray(tuple(uv), io, eo)
+        h = raycast(o, d, ctx.ray_surface, ctx.frame, ctx.config.raycast)
+        if h is not None:
+            hits.append(h)
+    if not hits:
+        return None
+    return hits[0] if choice.footprint_uvs is None else median_hit(hits, ctx.frame)
 
 
 def attach_ground_height(hit: RayHit, ctx: PipelineContext) -> None:

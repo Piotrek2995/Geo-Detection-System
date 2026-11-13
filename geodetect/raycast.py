@@ -135,3 +135,16 @@ def _make_hit(proj: SurfaceProjector, origin, direction, t: float) -> RayHit:
     z_surf = float(proj.surface.sample_many(sx, sy)[0])
     return RayHit(p, float(x[0]), float(y[0]), float(H[0]), float(lon[0]), float(lat[0]),
                   float(t), proj.surface.name, z_surf)
+
+
+def median_hit(hits: list[RayHit], frame: EnuFrame) -> RayHit:
+    """Trafienie zbiorcze (mask_footprint_median): mediana XY/H/zasiegu z wielu promieni."""
+    x = float(np.median([h.x_2180 for h in hits]))
+    y = float(np.median([h.y_2180 for h in hits]))
+    lon, lat = frame.puwg92_to_lonlat(x, y)
+    ground = [h.ground_h for h in hits if h.ground_h is not None]
+    return RayHit(np.median([h.enu for h in hits], axis=0), x, y,
+                  float(np.median([h.h for h in hits])), float(lon), float(lat),
+                  float(np.median([h.range_m for h in hits])), hits[0].surface,
+                  float(np.nanmedian([h.surface_h for h in hits])),
+                  float(np.median(ground)) if ground else None)

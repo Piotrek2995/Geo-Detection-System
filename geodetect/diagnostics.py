@@ -94,20 +94,36 @@ class ZScan:
         return float(self.offsets[int(np.nanargmin(self.rms))])
 
     @property
+    def refined_offset(self) -> float:
+        """Minimum paraboli dopasowanej do 5 punktow wokol najlepszego offsetu
+        (dokladnosc ponizej kroku skanu); best_offset, gdy dopasowanie niemozliwe."""
+        i = int(np.nanargmin(self.rms))
+        lo, hi = max(0, i - 2), min(len(self.rms), i + 3)
+        x, y = self.offsets[lo:hi], self.rms[lo:hi]
+        ok = np.isfinite(y)
+        if ok.sum() < 3:
+            return self.best_offset
+        a, b, _ = np.polyfit(x[ok], y[ok], 2)
+        if a <= 0:
+            return self.best_offset
+        return float(np.clip(-b / (2 * a), x[ok].min(), x[ok].max()))
+
+    @property
     def best_rms(self) -> float:
         return float(np.nanmin(self.rms))
 
 
 def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 15.0,
                      step_m: float = 0.25, eps_m: float = 10.0, cls_name: str = "namiot",
-                     min_views: int = 3) -> ZScan:
+                     min_views: int = 3, max_rays_per_detection: int = 30) -> ZScan:
     """Przeszukuje z_offset w [base - span, base + span]; dla kazdego przelicza trafienia
     detekcji z obiektow statycznych (sklad klastrow staly — z bazowego offsetu) i liczy RMS.
 
     NIE stosowac do kalibracji wynikow: minimalizacja rozrzutu, ktorego potem uzywamy jako
     miary jakosci, bylaby kolowa. Sluzy jako niezalezna kontrola trybu dem_alignment.
     Kierunki promieni nie zaleza od z_offset, wiec probki DEM wzdluz promieni sa w wiekszosci
-    wspolne (cache)."""
+    wspolne (cache). Detekcje z wieloma promieniami (mask_footprint_median): pozycja =
+    mediana trafien z co najwyzej `max_rays_per_detection` promieni (podprobka dla czasu)."""
     surface = getattr(ctx, "ray_surface", None) or ctx.dem
     objs = static_objects(batch, eps_m, cls_name, min_views)
     members = [[gd for gd in batch.detections if gd.object_id == o.object_id] for o in objs]
@@ -116,7 +132,10 @@ def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 1
         g_rays = []
         for gd in group:
             io, eo = ctx.reconstruction.camera(gd.image_name)
-            g_rays.append(pixel_to_ray(gd.uv, io, eo))
+            uvs = gd.ray_uvs
+            if len(uvs) > max_rays_per_detection:
+                uvs = uvs[np.linspace(0, len(uvs) - 1, max_rays_per_detection).astype(int)]
+            g_rays.append([pixel_to_ray(tuple(uv), io, eo) for uv in uvs])
         rays.append(g_rays)
 
     base = ctx.z_calibration.offset
@@ -129,10 +148,11 @@ def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 1
         sq = []
         for g_rays in rays:
             pts = []
-            for origin, direction in g_rays:
-                hit = raycast(origin, direction, surface, frame, ctx.config.raycast)
-                if hit is not None:
-                    pts.append((hit.x_2180, hit.y_2180))
+            for det_rays in g_rays:
+                hs = [raycast(o, d, surface, frame, ctx.config.raycast) for o, d in det_rays]
+                xy = [(h.x_2180, h.y_2180) for h in hs if h is not None]
+                if xy:
+                    pts.append(tuple(np.median(np.array(xy), axis=0)))
             if len(pts) >= 2:
                 p = np.array(pts)
                 sq.extend(((p - p.mean(0)) ** 2).sum(1))

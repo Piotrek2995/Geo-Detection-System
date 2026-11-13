@@ -76,6 +76,50 @@ class SurfaceConfig:
     area_buffer_m: float = 300.0             # mozaika: bbox kamer + bufor
 
 
+POINT_METHODS = ("bbox_center", "bbox_bottom_center", "mask_centroid",
+                 "mask_ground_contact", "mask_footprint_median")
+MASK_METHODS = ("mask_centroid", "mask_ground_contact", "mask_footprint_median")
+
+
+@dataclass
+class PointConfig:
+    """Punkt reprezentatywny detekcji — piksel (lub piksele), przez ktory idzie promien.
+
+    method: bbox_center | bbox_bottom_center | mask_centroid | mask_ground_contact |
+            mask_footprint_median (opis w geodetect/points.py); per_class nadpisuje method
+            dla wybranych klas, np. {people: bbox_bottom_center}.
+    Metody mask_* uzywaja SAM (ultralytics, prompt = bbox YOLO); maski w cache na dysku.
+    Maska odrzucona przez kontrole jakosci -> bbox_center (z adnotacja w wynikach)."""
+    method: str = "bbox_center"
+    per_class: dict[str, str] = field(default_factory=dict)
+    # SAM
+    sam_model: Path = Path("sam2.1_b.pt")      # lzejsza opcja: mobile_sam.pt
+    sam_device: Optional[str] = None           # None = GPU jesli dostepne
+    mask_cache_dir: Path = Path("output/cache/masks")
+    # kontrola jakosci maski (najwieksza spojna skladowa)
+    min_area_ratio: float = 0.10       # pole maski / pole bboxa ponizej -> "too_small"
+    max_area_ratio: float = 0.97       # powyzej i dotyka wszystkich krawedzi -> "fills_bbox"
+    min_largest_frac: float = 0.60     # najwieksza skladowa / cala maska ponizej -> "fragmented"
+    edge_tol_px: float = 2.0
+    # mask_ground_contact
+    min_offnadir_deg: float = 5.0      # obiekt blizej nadiru -> kierunek pionu nieokreslony
+    contact_band: float = 0.05         # pas przy krawedzi styku (ulamek rozciaglosci maski)
+    # mask_footprint_median
+    footprint_samples: int = 200
+    seed: int = 0
+
+    def method_for(self, cls_name: str) -> str:
+        return self.per_class.get(cls_name, self.method)
+
+    def needs_masks(self) -> bool:
+        return any(m in MASK_METHODS for m in [self.method, *self.per_class.values()])
+
+    def validate(self) -> None:
+        for m in [self.method, *self.per_class.values()]:
+            if m not in POINT_METHODS:
+                raise ValueError(f"Nieznana metoda punktu {m!r} (dozwolone: {POINT_METHODS})")
+
+
 @dataclass
 class FilterConfig:
     """Filtry pojedynczych detekcji. Odrzucone zostaja w wynikach z `rejected_reason`,
@@ -140,6 +184,7 @@ class PipelineConfig:
     aggregate: AggregateConfig = field(default_factory=AggregateConfig)
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
     surface: SurfaceConfig = field(default_factory=SurfaceConfig)
+    point: PointConfig = field(default_factory=PointConfig)
 
     # ── pochodne sciezki ODM ──
     @property
@@ -205,14 +250,16 @@ class PipelineConfig:
         self.surface.nmt_dir = res(self.surface.nmt_dir)
         self.surface.nmpt_dir = res(self.surface.nmpt_dir)
         self.surface.odm_dsm = res(self.surface.odm_dsm)
+        self.point.mask_cache_dir = res(self.point.mask_cache_dir)
+        self.point.sam_model = res(self.point.sam_model)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
-                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir"}
+                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir"}
 _NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
-           "surface": SurfaceConfig}
+           "surface": SurfaceConfig, "point": PointConfig}
 
 
 def _build(cls, data: dict[str, Any]):

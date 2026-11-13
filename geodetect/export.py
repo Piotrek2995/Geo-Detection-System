@@ -55,6 +55,12 @@ def detection_properties(gd: GeoDetection) -> dict:
         "range_m": round(h.range_m, 2),
         "incidence_deg": round(gd.incidence_deg, 2),
         "touches_border": gd.touches_border,
+        "point_method": gd.point.method if gd.point else "bbox_center",
+        "point_used": gd.point.used if gd.point else "bbox_center",
+        "point_fallback": gd.point.fallback if gd.point else None,
+        "mask_area_ratio": (round(gd.point.mask_quality.area_ratio, 3)
+                            if gd.point and gd.point.mask_quality else None),
+        "n_rays": int(len(gd.ray_uvs)),
         "pixel_u": round(gd.uv[0], 1),
         "pixel_v": round(gd.uv[1], 1),
         "bbox": [round(v, 1) for v in gd.detection.bbox],
