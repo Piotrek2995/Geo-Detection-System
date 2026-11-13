@@ -14,13 +14,13 @@ import numpy as np
 
 from .config import FilterConfig, PipelineConfig
 from .dem import DemSampler, resolve_dem
-from .detect import Detection, Detector
+from .detect import Detection, Detector, validate_class_names
 from .exif import GpsFix, read_gps
 from .geo import EnuFrame
 from .odm import CameraEO, CameraIO, OdmReconstruction
 from .points import PointChoice, choose_point
 from .raycast import RayHit, median_hit, pixel_to_ray, raycast
-from .segment import Segmenter, clean_mask
+from .segment import Segmenter, clean_mask, mask_from_polygons
 from .surface import Surface, area_bounds_2180, as_surface, build_surface
 from .zcal import ZCalibration, calibrate_z
 
@@ -109,8 +109,10 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -
     log.info("Powierzchnia ray castingu: %s (uklad wysokosci %s, krok %.2f m)", surface.name,
              surface.vertical, config.raycast.step_for(surface.resolution_m))
     if detector is None:
-        detector = Detector(config.model_path, conf=config.detect.conf,
-                            classes=config.detect.classes, device=config.detect.device)
+        detector = Detector(config.model_path, config.detect)
+    names = getattr(detector, "names", None)
+    if names:   # nazwy klas z konfiguracji musza istniec w modelu
+        validate_class_names(config.point.per_class, names.values(), "point.per_class")
     return PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
                            z_cal, detector, surface)
 
@@ -156,12 +158,16 @@ def run_single(config: PipelineConfig, image_name: str,
 
 def choose_points(ctx: PipelineContext, image_path, dets: list[Detection], io: CameraIO,
                   eo: CameraEO) -> list[PointChoice]:
-    """Punkt reprezentatywny kazdej detekcji wg cfg.point. Maski SAM liczone (lub brane
-    z cache) tylko dla detekcji, ktorych metoda ich wymaga."""
+    """Punkt reprezentatywny kazdej detekcji wg cfg.point. Maski: z modelu
+    segmentacyjnego (Detection.polygons), a gdy ich brak — z SAM (liczone lub z cache)
+    tylko dla detekcji, ktorych metoda ich wymaga."""
     pc = ctx.config.point
     methods = [pc.method_for(d.cls_name) for d in dets]
-    need = [i for i, m in enumerate(methods) if m.startswith("mask_")]
     masks: dict[int, object] = {}
+    for i, (d, m) in enumerate(zip(dets, methods)):
+        if m.startswith("mask_") and d.polygons:
+            masks[i] = mask_from_polygons(d.polygons, d.bbox, (io.width, io.height))
+    need = [i for i, m in enumerate(methods) if m.startswith("mask_") and i not in masks]
     if need:
         if ctx.segmenter is None:
             ctx.segmenter = Segmenter(pc)
@@ -170,7 +176,7 @@ def choose_points(ctx: PipelineContext, image_path, dets: list[Detection], io: C
         except Exception as exc:     # SAM niedostepny -> fallback per detekcja
             log.warning("SAM: %s — fallback bbox_center", exc)
             got = [None] * len(need)
-        masks = dict(zip(need, got))
+        masks.update(zip(need, got))
     out = []
     for i, (det, m) in enumerate(zip(dets, methods)):
         mask, quality = masks.get(i), None

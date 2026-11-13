@@ -22,9 +22,21 @@ CAMERA_COLOR = "#52514e"
 REJECTED_COLOR = "#8a8984"
 
 
+SINGLE_VIEW_COLOR = "#8a8984"
+
+
 def class_colors(batch: BatchResult) -> dict[str, str]:
-    names = sorted({gd.detection.cls_name for gd in batch.detections})
-    return {n: CLASS_PALETTE[i % len(CLASS_PALETTE)] for i, n in enumerate(names)}
+    """Kolor klasy: detect.colors z configu, a dla pozostalych kolejne sloty palety."""
+    names = sorted({gd.detection.cls_name for gd in batch.detections}
+                   | {o.cls_name for o in batch.objects})
+    custom = batch.config.detect.colors if batch.config is not None else {}
+    free = iter([c for c in CLASS_PALETTE if c not in custom.values()] * 3)
+    return {n: custom[n] if n in custom else next(free) for n in names}
+
+
+def class_label(batch: BatchResult, cls_name: str) -> str:
+    """Nazwa wyswietlana klasy (detect.display_names), domyslnie nazwa z modelu."""
+    return batch.config.detect.display(cls_name) if batch.config is not None else cls_name
 
 
 def _write_json(obj: dict, path: Path) -> Path:
@@ -42,6 +54,8 @@ def detection_properties(gd: GeoDetection) -> dict:
         "image": gd.image_name,
         "class": gd.detection.cls_name,
         "conf": round(gd.detection.conf, 3),
+        "det_source": gd.detection.source,
+        "tile_truncated": gd.detection.tile_truncated,
         "object_id": gd.object_id,
         "accepted": gd.accepted,
         "rejected_reason": gd.rejected_reason,
@@ -71,6 +85,7 @@ def object_properties(o: AggregatedObject) -> dict:
     return {
         "object_id": o.object_id,
         "class": o.cls_name,
+        "status": o.status,
         "n_views": o.n_views,
         "images": o.images,
         "rms_m": round(o.rms_m, 3),
@@ -85,7 +100,7 @@ def object_properties(o: AggregatedObject) -> dict:
     }
 
 
-OBJECT_CSV_FIELDS = ["object_id", "class", "n_views", "images", "rms_m", "max_m", "mean_conf",
+OBJECT_CSV_FIELDS = ["object_id", "class", "class_label", "status", "n_views", "images", "rms_m", "max_m", "mean_conf",
                      "mean_incidence_deg", "mean_range_m", "altitude_m", "x_2180", "y_2180",
                      "duplicate_images", "lon", "lat"]
 
@@ -93,10 +108,13 @@ OBJECT_CSV_FIELDS = ["object_id", "class", "n_views", "images", "rms_m", "max_m"
 # ───────────── GeoJSON / CSV ─────────────
 
 def detections_geojson(batch: BatchResult) -> dict:
+    status = {o.object_id: o.status for o in batch.objects}
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature",
          "geometry": {"type": "Point", "coordinates": [gd.hit.lon, gd.hit.lat]},
-         "properties": detection_properties(gd)}
+         "properties": {**detection_properties(gd),
+                        "class_label": class_label(batch, gd.detection.cls_name),
+                        "object_status": status.get(gd.object_id)}}
         for gd in batch.detections]}
 
 
@@ -104,7 +122,7 @@ def objects_geojson(batch: BatchResult) -> dict:
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature",
          "geometry": {"type": "Point", "coordinates": [o.lon, o.lat]},
-         "properties": object_properties(o)}
+         "properties": {**object_properties(o), "class_label": class_label(batch, o.cls_name)}}
         for o in batch.objects]}
 
 
@@ -113,6 +131,7 @@ def export_objects_csv(batch: BatchResult, path: Path) -> Path:
     rows = []
     for o in batch.objects:
         p = object_properties(o)
+        p["class_label"] = class_label(batch, o.cls_name)
         p["lon"], p["lat"] = round(o.lon, 8), round(o.lat, 8)
         p["images"] = ";".join(o.images)
         p["duplicate_images"] = ";".join(o.duplicate_images)
@@ -168,7 +187,8 @@ def make_folium_map(batch: BatchResult):
         folium.CircleMarker(
             [gd.hit.lat, gd.hit.lon], radius=4, color=color, weight=1,
             fill=True, fill_opacity=0.6,
-            tooltip=f"{gd.detection.cls_name} {gd.detection.conf:.2f} — {gd.image_name}",
+            tooltip=f"{class_label(batch, gd.detection.cls_name)} {gd.detection.conf:.2f} — "
+                    f"{gd.image_name}",
             popup=folium.Popup(_popup_table(props), max_width=350),
         ).add_to(layer)
         if gd.object_id is not None:
@@ -177,17 +197,25 @@ def make_folium_map(batch: BatchResult):
                             color=colors[gd.detection.cls_name], weight=1, opacity=0.6
                             ).add_to(fg_lines)
 
-    fg_obj = folium.FeatureGroup(name="Obiekty zagregowane")
+    # confirmed: pelny kolor klasy; single_view: obrys w kolorze klasy, szare wypelnienie,
+    # przerywana linia, osobna warstwa (mozliwe falszywe detekcje, brak potwierdzenia)
+    fg_obj = folium.FeatureGroup(name="Obiekty potwierdzone (confirmed)")
+    fg_single = folium.FeatureGroup(name="Obiekty z jednego widoku (single_view)")
     for o in batch.objects:
+        single = not o.confirmed
         folium.CircleMarker(
-            [o.lat, o.lon], radius=8, color="#ffffff", weight=2,
-            fill=True, fill_color=colors[o.cls_name], fill_opacity=1.0,
-            tooltip=f"obiekt {o.object_id}: {o.cls_name}, {o.n_views} widokow, "
-                    f"RMS {o.rms_m:.2f} m",
-            popup=folium.Popup(_popup_table(object_properties(o)), max_width=400),
-        ).add_to(fg_obj)
+            [o.lat, o.lon], radius=8, color=colors[o.cls_name] if single else "#ffffff",
+            weight=2, dash_array="4 3" if single else None, fill=True,
+            fill_color=SINGLE_VIEW_COLOR if single else colors[o.cls_name],
+            fill_opacity=0.5 if single else 1.0,
+            tooltip=f"obiekt {o.object_id}: {class_label(batch, o.cls_name)} [{o.status}], "
+                    f"{o.n_views} widokow, RMS {o.rms_m:.2f} m",
+            popup=folium.Popup(_popup_table({**object_properties(o),
+                                             "class_label": class_label(batch, o.cls_name)}),
+                               max_width=400),
+        ).add_to(fg_single if single else fg_obj)
 
-    for fg in (fg_cam, fg_lines, fg_det, fg_rej, fg_obj):
+    for fg in (fg_cam, fg_lines, fg_det, fg_rej, fg_obj, fg_single):
         fg.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     return m
@@ -233,7 +261,7 @@ def plot_spread(batch: BatchResult, out_png: Path) -> Path | None:
             x, y = zip(*pts)
             ax.scatter(x, y, s=42, marker=CLASS_MARKERS[i % len(CLASS_MARKERS)],
                        color=colors[cls], edgecolor="#fcfcfb", linewidth=1.2,
-                       label=f"{cls} (n={len(pts)})", zorder=3)
+                       label=f"{class_label(batch, cls)} (n={len(pts)})", zorder=3)
         ax.set_xlabel(xlabel)
     axes[0].set_ylabel("Odchylenie od srodka obiektu [m]")
     axes[0].legend(frameon=False, loc="upper left")

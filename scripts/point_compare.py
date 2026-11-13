@@ -258,8 +258,7 @@ def main() -> int:
     base.aggregate.eps_m = args.eps
     if args.cold and base.point.mask_cache_dir.exists():
         shutil.rmtree(base.point.mask_cache_dir)
-    detector = CachedDetector(Detector(base.model_path, conf=base.detect.conf,
-                                       classes=base.detect.classes))
+    detector = CachedDetector(Detector(base.model_path, base.detect))
     seg = Segmenter(base.point)
     rows, last_ctx, last_batch = [], None, None
     for m in args.methods:

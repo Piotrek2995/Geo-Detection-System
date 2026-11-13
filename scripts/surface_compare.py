@@ -43,8 +43,7 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
     base = PipelineConfig.from_file(args.config)
-    detector = CachedDetector(Detector(base.model_path, conf=base.detect.conf,
-                                       classes=base.detect.classes))
+    detector = CachedDetector(Detector(base.model_path, base.detect))
     rows, ref = [], None
     for src in args.sources:
         cfg = copy.deepcopy(base)

@@ -56,7 +56,7 @@ class SwappedAxesGugikDem(GugikDem):
 def run_legacy(image_name: str) -> list[dict]:
     import legacy.prototype_main as old
     old.PHOTOS_DIR = ROOT / "zdjecia"
-    old.MODEL_PATH = ROOT / "LudzieiNamioty.pt"
+    old.MODEL_PATH = ROOT / "models" / "LudzieiNamioty.pt"
     old.ODM_RECONSTRUCTION = ROOT / "odm_project" / "opensfm" / "reconstruction.json"
     old.ODM_REFERENCE_LLA = ROOT / "odm_project" / "opensfm" / "reference_lla.json"
     old.ODM_SHOTS_GEOJSON = ROOT / "odm_project" / "odm_report" / "shots.geojson"
@@ -114,7 +114,7 @@ def main() -> None:
     logging.basicConfig(level=logging.WARNING)
 
     cfg = PipelineConfig.from_dict({}, base_dir=ROOT)
-    detector = Detector(cfg.model_path, conf=cfg.detect.conf)
+    detector = Detector(cfg.model_path, cfg.detect)
 
     for name in images:
         A = sorted(run_legacy(name), key=lambda r: r["uv"])

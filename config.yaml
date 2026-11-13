@@ -3,7 +3,7 @@
 
 photos_dir: zdjecia
 odm_dir: odm_project          # wynik OpenDroneMap (opensfm/reconstruction.json, reference_lla.json)
-model_path: LudzieiNamioty.pt
+model_path: models/LudzieiNamioty.pt
 output_dir: output
 
 # Jedno zdjecie (string) albo lista
@@ -18,10 +18,36 @@ dem:
   timeout_s: 10.0
   cache_path: output/cache/gugik_nmt.json   # cache probek GUGiK na dysku (null = tylko w pamieci)
 
+# Detekcja YOLO. Klasy zawsze po NAZWIE z model.names (nieznana nazwa -> blad z lista
+# dostepnych). Domyslne wartosci dobrane w scripts/detect_compare.py (README, "Detekcja"):
+# kafle tylko dla people (recall 0.65 -> 0.85 przy P 1.00), namioty z pelnego obrazu
+# (kafle dokladaly falszywe namioty w krzakach).
 detect:
   conf: 0.25
-  classes: null               # null = wszystkie; np. [namiot, people]
-  device: null                # null = auto; np. "0" (GPU) lub "cpu"
+  conf_per_class:
+    people: 0.5
+  classes: all                # all | lista nazw, np. [namiot, people]
+  display_names:              # nazwy na mapie / w eksporcie
+    namiot: namiot
+    people: człowiek
+  colors:                     # kolory klas na mapie (hex)
+    namiot: "#2a78d6"
+    people: "#eb6834"
+  iou: 0.7                    # NMS
+  imgsz: null                 # null = z treningu modelu (LudzieiNamioty.pt: 1024)
+  device: auto                # auto | cuda | cuda:0 | cpu
+  half: true                  # fp16 (tylko GPU; na CPU ignorowane przez ultralytics)
+  max_det: 300
+  batch: 8
+  tiling:
+    enabled: true
+    classes: [people]         # klasy z kafli; pozostale tylko z pelnego obrazu
+    tile_size: null           # null = imgsz
+    overlap: 0.2
+    include_full: true        # + pelny obraz przeskalowany (duze obiekty)
+    edge_margin_px: 3.0
+    nms_iou: 0.5
+    contain_ios: 0.6
 
 # Ray casting: marsz po promieniu + bisekcja na PIERWSZYM przecieciu z powierzchnia.
 # Krok: step_m dla REST (brak rozdzielczosci); dla rastrow min(step_m,
@@ -62,7 +88,7 @@ point:
   method: bbox_center
   per_class:
     people: bbox_bottom_center
-  sam_model: sam2.1_b.pt            # lzejszy: mobile_sam.pt (pobierane automatycznie)
+  sam_model: models/sam2.1_b.pt            # lzejszy: mobile_sam.pt (pobierane automatycznie)
   sam_device: null                  # null = GPU jesli dostepne
   mask_cache_dir: output/cache/masks
   min_area_ratio: 0.10              # maska / bbox ponizej -> too_small
@@ -90,6 +116,7 @@ aggregate:
   # dem_alignment glowny namiot (26 widokow) miesci sie w eps=2.5 (RMS 1.2 m).
   eps_m: 2.5
   min_samples: 1              # 1 = obiekt widziany na jednym zdjeciu tez jest obiektem
+  min_views: 2                # >= min_views widokow -> confirmed, inaczej single_view
   weights: equal              # equal | conf | cos_incidence
 
 # Kalibracja wysokosci: H [m npm] = h_ODM + z_offset. Potensic zapisuje GPS Altitude jako

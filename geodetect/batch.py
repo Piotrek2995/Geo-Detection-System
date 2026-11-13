@@ -27,6 +27,7 @@ class BatchResult:
     skipped: dict[str, str]              # nazwa zdjecia -> powod pominiecia
     objects: list[AggregatedObject] = field(default_factory=list)
     z_calibration: Optional[ZCalibration] = None
+    config: Optional[PipelineConfig] = None    # nazwy wyswietlane / kolory klas w eksporcie
 
     @property
     def detections(self) -> list[GeoDetection]:
@@ -69,11 +70,13 @@ def summary_text(batch: BatchResult) -> str:
     n_border = sum(gd.touches_border for gd in batch.detections)
     lines.append(f"  touches_border: {n_border}")
     per_cls = Counter(o.cls_name for o in batch.objects)
-    lines.append("Obiekty: " + ", ".join(f"{c}={n}" for c, n in sorted(per_cls.items())))
-    lines.append(f"  {'id':>3} {'klasa':8} {'widoki':>6} {'RMS[m]':>7} {'max[m]':>7} "
+    conf_cls = Counter(o.cls_name for o in batch.objects if o.confirmed)
+    lines.append("Obiekty (confirmed / wszystkie): " + ", ".join(
+        f"{c}={conf_cls[c]}/{n}" for c, n in sorted(per_cls.items())))
+    lines.append(f"  {'id':>3} {'klasa':8} {'status':11} {'widoki':>6} {'RMS[m]':>7} {'max[m]':>7} "
                  f"{'inc[deg]':>8} {'range[m]':>8} {'conf':>5}  zdjecia")
     for o in batch.objects:
-        lines.append(f"  {o.object_id:>3} {o.cls_name:8} {o.n_views:>6} {o.rms_m:>7.2f} "
+        lines.append(f"  {o.object_id:>3} {o.cls_name:8} {o.status:11} {o.n_views:>6} {o.rms_m:>7.2f} "
                      f"{o.max_m:>7.2f} {o.mean_incidence_deg:>8.1f} {o.mean_range_m:>8.1f} "
                      f"{o.mean_conf:>5.2f}  {','.join(i.removesuffix('.JPG') for i in o.images)}")
     if batch.suspicious_objects:
@@ -128,7 +131,7 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
             skipped[name] = f"blad: {e}"
 
     save_dem_cache(ctx.dem)
-    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration)
+    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration, config=cfg)
     batch.objects = aggregate(batch.detections, cfg.aggregate)
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),

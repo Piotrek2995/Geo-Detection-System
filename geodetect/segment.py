@@ -147,3 +147,21 @@ def crop_mask(full: np.ndarray, bbox, margin: float = 0.25) -> ObjectMask:
     c0, r0 = max(0, int(np.floor(x1 - mx))), max(0, int(np.floor(y1 - my)))
     c1, r1 = min(W, int(np.ceil(x2 + mx))), min(H, int(np.ceil(y2 + my)))
     return ObjectMask(full[r0:r1, c0:c1].copy(), c0, r0)
+
+
+def mask_from_polygons(polygons: list, bbox, image_size: tuple[int, int],
+                       margin: float = 0.25) -> ObjectMask:
+    """Maska z konturow modelu segmentacyjnego (wspolrzedne zdjecia) jako wycinek wokol
+    bboxa — ten sam format co maski SAM, wiec metody mask_* dzialaja bez SAM.
+    image_size = (szerokosc, wysokosc)."""
+    W, H = image_size
+    x1, y1, x2, y2 = bbox
+    mx, my = (x2 - x1) * margin, (y2 - y1) * margin
+    c0, r0 = max(0, int(np.floor(x1 - mx))), max(0, int(np.floor(y1 - my)))
+    c1, r1 = min(W, int(np.ceil(x2 + mx))), min(H, int(np.ceil(y2 + my)))
+    m = np.zeros((r1 - r0, c1 - c0), np.uint8)
+    for p in polygons:
+        pts = np.round(np.asarray(p, dtype=np.float64) - [c0, r0]).astype(np.int32)
+        if len(pts) >= 3:
+            cv2.fillPoly(m, [pts.reshape(-1, 1, 2)], 1)
+    return ObjectMask(m.astype(bool), c0, r0)

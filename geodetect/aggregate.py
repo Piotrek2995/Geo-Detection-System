@@ -38,6 +38,11 @@ class AggregatedObject:
     mean_incidence_deg: float
     mean_range_m: float
     duplicate_images: list[str] = field(default_factory=list)  # zdjecia >1 raz w klastrze
+    status: str = "confirmed"  # confirmed (>= aggregate.min_views widokow) | single_view
+
+    @property
+    def confirmed(self) -> bool:
+        return self.status == "confirmed"
 
 
 def dbscan(points: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
@@ -94,6 +99,7 @@ def aggregate(detections: list[GeoDetection], cfg: AggregateConfig) -> list[Aggr
         for lab in range(labels.max() + 1):
             members = [d for d, l in zip(dets, labels) if l == lab]
             obj = _make_object(len(objects), cls_name, members, cfg.weights, to_lonlat)
+            obj.status = "confirmed" if obj.n_views >= cfg.min_views else "single_view"
             for d in members:
                 d.object_id = obj.object_id
             objects.append(obj)

@@ -30,6 +30,7 @@ i `odm_project/odm_report/shots.geojson`.
 python main.py                                   # config.yaml
 python main.py --config config.yaml
 python main.py --image SING0304.JPG --image SING0316.JPG
+python main.py --all --surface nmt_local --eps 10
 ```
 
 Wszystkie parametry (ścieżki, zdjęcia, źródło DEM, klasy, confidence, ray casting,
@@ -67,14 +68,81 @@ export_all(batch, cfg.output_dir)
 
 | Plik | Zawartość |
 |---|---|
-| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `conf`, `object_id`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, `surface`, `surface_h`, `ground_h`, `above_ground_m`, piksel, bbox |
-| `objects.geojson` | obiekty zagregowane: `n_views`, `images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `mean_incidence_deg`, `mean_range_m`, `duplicate_images` |
+| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `class_label`, `conf`, `det_source` (full / tile / merged), `tile_truncated`, `object_id`, `object_status`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, `surface`, `surface_h`, `ground_h`, `above_ground_m`, piksel, bbox |
+| `objects.geojson` | obiekty zagregowane: `status` (`confirmed` / `single_view`), `class_label`, `n_views`, `images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `mean_incidence_deg`, `mean_range_m`, `duplicate_images` |
 | `objects.csv` | to samo co `objects.geojson` + `lon`, `lat` |
-| `detections_map.html` | mapa folium z warstwami: kamery, detekcje, obiekty, linie detekcja→obiekt, odrzucone; popupy z atrybutami |
+| `detections_map.html` | mapa folium z warstwami: kamery, detekcje, obiekty potwierdzone, obiekty `single_view` (szare wypełnienie, przerywany obrys), linie detekcja→obiekt, odrzucone; popupy z atrybutami |
 | `spread.png` | odchylenie detekcji od środka obiektu w funkcji `incidence_deg` i `range_m` |
 
 Pole `duplicate_images` (i ostrzeżenie w podsumowaniu) oznacza klaster, w którym to samo
 zdjęcie występuje więcej niż raz. To może znaczyć, że scalono dwa blisko położone obiekty.
+
+Status obiektu: `confirmed`, gdy obiekt ma co najmniej `aggregate.min_views` widoków
+(domyślnie 2), inaczej `single_view`. Obiekty `single_view` zostają w wynikach, ale są
+oznaczone. Pomaga to odsiać fałszywe detekcje bez etykiet. Status nie gwarantuje jednak
+poprawności: fałszywy alarm na stałym obiekcie (dach, krzaki) widziany z kilku zdjęć też
+dostaje `confirmed`.
+
+### Detekcja (`detect`)
+
+- **Modele** leżą w `models/`. W repo jest tylko `models/LudzieiNamioty.pt`, pozostałe
+  wagi (`*.pt`, w tym SAM) są w `.gitignore`. `geodetect.detect.list_models("models")`
+  zwraca metadane do listy wyboru w GUI: plik, `task` (detect / segment), `names`, `imgsz`
+  z treningu, rozmiar i datę. Wagi spoza YOLO (np. SAM) są pomijane. Model
+  segmentacyjny (`task=segment`) daje kontury masek: metody `mask_*` z sekcji `point`
+  używają ich zamiast SAM.
+- **Klasy** są zawsze brane po nazwie z `model.names`, nigdy po ID:
+  - `classes` (`all` albo lista);
+  - `conf_per_class`;
+  - `display_names` (np. `people: człowiek`);
+  - `colors` (kolory na mapie);
+  - `point.per_class`.
+
+  Nazwa, której nie ma w modelu, daje błąd z listą dostępnych klas.
+- **Inferencja**:
+  - `conf` (globalny) i `conf_per_class`: model dostaje najniższy próg, a filtr per klasa
+    działa potem;
+  - `iou` (NMS), `max_det`, `device` (auto / cuda / cpu), `half` (fp16) i `batch`;
+  - `imgsz: null` bierze rozmiar z treningu modelu. Dla `LudzieiNamioty.pt` to 1024.
+    Efektywna wartość jest logowana. Stary kod też używał 1024, bo ultralytics brał je
+    z `overrides` checkpointu.
+- **Kafle** (`detect.tiling`, własna implementacja w `geodetect/tiling.py`, nie SAHI):
+  - kafle `tile_size` (domyślnie `imgsz`) z zakładką `overlap`, opcjonalnie plus pełny
+    obraz; `tiling.classes` ogranicza kafle do wybranych klas;
+  - box dotykający **wewnętrznej** krawędzi kafla jest oznaczany jako ucięty. Taki box
+    jest odrzucany, gdy ten sam obiekt widać w całości w innym kaflu albo na pełnym
+    obrazie, albo gdy inny kafel widzi jego otoczenie i nic tam nie wykrył;
+  - ucięte kawałki uzupełniające się są łączone w jeden box, a na końcu działa NMS per
+    klasa między kaflami i pełnym obrazem;
+  - flaga `touches_border` dotyczy krawędzi **zdjęcia**, nie kafla.
+
+  SAHI odpadło, bo nie odróżnia boxa uciętego od pełnego. Ucięty box przesuwa środek
+  obiektu, a więc i georeferencję.
+
+Ocena wariantów (`scripts/detect_compare.py`, 26 zdjęć, nmt_local, eps 10 m). Precision
+i recall policzone na **20 zdjęciach z etykietami** z eksportu Roboflow `namioty_nasze` v7
+(`PYTORCH/28sierpniaMODEL5`). Etykiety są niezależne od modelu: `LudzieiNamioty.pt`
+trenowano 30.03.2026 na v4 (`dataset_yolo26`), w którym tych zdjęć nie ma. Z wersji
+z augmentacją wybierana jest ta bez obrotu (rejestracja ORB, `geodetect/gt_labels.py`).
+
+| wariant (conf people) | namiot P / R | people P / R (IoU 0,5) | ms/zdjęcie (fp16) |
+|---|---|---|---|
+| bez kafli (0,25) | 0,95 / 1,00 | 0,93 / 0,65 | 60 |
+| kafle (0,25) | 0,87 / 1,00 | 0,82 / 0,90 | 88 |
+| kafle + pełny (0,25) | 0,83 / 1,00 | 0,83 / 0,95 | 102 |
+| kafle + pełny (0,50) | 0,87 / 1,00 | 1,00 / 0,85 | 102 |
+| **kafle tylko dla people + pełny (0,50)** | **0,95 / 1,00** | **1,00 / 0,85** | 102 |
+
+Kafle wyraźnie poprawiają recall ludzi, bo osoba ma na pełnym obrazie 15–50 px. Namiotom
+dokładają tylko fałszywe alarmy w krzakach nad strumieniem. Stąd domyślnie: kafle tylko
+dla `people`, namioty z pełnego obrazu, `conf_per_class.people: 0.5`, fp16. Jedyny
+fałszywy namiot w każdym wariancie to dach domu (SING0310 i SING0312). Ma 2 widoki, więc
+jest `confirmed`, i to jest „drugi namiot” z ocen w zadaniach 4–5. Podglądy detekcji
+różniących się od wariantu bez kafli zapisuje skrypt w `output/detect/`.
+
+```powershell
+python scripts/detect_compare.py --gt C:/Users/pc/PycharmProjects/PYTORCH/28sierpniaMODEL5
+```
 
 ### Kalibracja wysokości (`z_anchor`)
 
@@ -240,7 +308,9 @@ geodetect/
   geo.py        EnuFrame: lokalne ENU (ODM) -> WGS84 -> EPSG:2180 (ściśle)
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
   zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment
-  detect.py     Detector (YOLO, model ładowany raz)
+  detect.py     Detector (YOLO: klasy po nazwie, progi, kafle), list_models / model_info
+  tiling.py     siatka kafli, scalanie detekcji z kafli (ucięte boxy, NMS)
+  gt_labels.py  etykiety YOLO z eksportu Roboflow jako ground truth (letterbox, obrót)
   points.py     punkt reprezentatywny detekcji (bbox / maska SAM), geometria punktu nadiru
   segment.py    maski SAM (prompt = bbox), cache na dysku, kontrola jakości
   surface.py    powierzchnie ray castingu: REST GUGiK, mozaika arkuszy NMT/NMPT, DSM ODM
@@ -257,7 +327,9 @@ scripts/        compare_legacy.py — prototyp vs pakiet; zcal_compare.py — tr
                 pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM;
                 check_surface_coverage.py — pokrycie arkuszy NMT/NMPT;
                 surface_compare.py — zestawienie źródeł powierzchni;
-                point_compare.py — ocena metod punktu reprezentatywnego
+                point_compare.py — ocena metod punktu reprezentatywnego;
+                detect_compare.py — warianty detekcji (kafle, progi), P/R z etykiet
+models/         wagi modeli (w repo tylko LudzieiNamioty.pt)
 tests/          testy jednostkowe
 ODM.md          instrukcja OpenDroneMap
 PROGRES/        raporty postępu

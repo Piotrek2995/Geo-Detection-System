@@ -29,12 +29,55 @@ class DemConfig:
 
 
 @dataclass
+class TilingConfig:
+    """Inferencja kafelkowa: kafle tile_size (None = imgsz) z zakladka `overlap`,
+    opcjonalnie + pelny obraz przeskalowany do imgsz (duze obiekty). Scalanie w
+    geodetect/tiling.py."""
+    enabled: bool = False
+    classes: Optional[list[str]] = None   # klasy brane z kafli (None = wszystkie); pozostale
+                                          # tylko z pelnego obrazu (wymusza pelny obraz)
+    tile_size: Optional[int] = None
+    overlap: float = 0.2
+    include_full: bool = True
+    edge_margin_px: float = 3.0     # box blizej wewnetrznej krawedzi kafla -> uciety
+    nms_iou: float = 0.5            # NMS miedzy kaflami (per klasa)
+    contain_ios: float = 0.6        # przeciecie / pole mniejszego: duplikat zawarty w innym boxie
+
+
+@dataclass
 class DetectConfig:
-    """Parametry detekcji YOLO. `classes` = lista nazw klas z model.names
-    (None = wszystkie klasy)."""
+    """Parametry detekcji YOLO — klasy zawsze po NAZWIE z model.names (nie po ID).
+
+    classes: lista nazw albo "all"/None; conf_per_class nadpisuje conf; display_names
+    i colors (hex) — nazwy i kolory klas na mapie / w eksporcie. imgsz None = z treningu
+    modelu. device: auto | cuda | cuda:0 | cpu. half = fp16 (tylko GPU)."""
     conf: float = 0.25
-    classes: Optional[list[str]] = None
-    device: Optional[str] = None  # None = automatycznie (GPU jesli dostepne)
+    conf_per_class: dict[str, float] = field(default_factory=dict)
+    classes: Optional[Any] = None
+    display_names: dict[str, str] = field(default_factory=dict)
+    colors: dict[str, str] = field(default_factory=dict)
+    iou: float = 0.7
+    imgsz: Optional[int] = None
+    device: Optional[str] = "auto"
+    half: bool = False
+    max_det: int = 300
+    batch: int = 8                  # obrazy/kafle na jedno wywolanie modelu
+    tiling: TilingConfig = field(default_factory=TilingConfig)
+
+    def class_list(self) -> Optional[list[str]]:
+        """None = wszystkie klasy."""
+        if self.classes is None or (isinstance(self.classes, str) and self.classes.lower() == "all"):
+            return None
+        return [self.classes] if isinstance(self.classes, str) else list(self.classes)
+
+    def conf_for(self, cls_name: str) -> float:
+        return float(self.conf_per_class.get(cls_name, self.conf))
+
+    def display(self, cls_name: str) -> str:
+        return self.display_names.get(cls_name, cls_name)
+
+    def torch_device(self) -> Optional[str]:
+        return None if self.device in (None, "", "auto") else self.device
 
 
 @dataclass
@@ -93,7 +136,7 @@ class PointConfig:
     method: str = "bbox_center"
     per_class: dict[str, str] = field(default_factory=dict)
     # SAM
-    sam_model: Path = Path("sam2.1_b.pt")      # lzejsza opcja: mobile_sam.pt
+    sam_model: Path = Path("models/sam2.1_b.pt")      # lzejsza opcja: mobile_sam.pt
     sam_device: Optional[str] = None           # None = GPU jesli dostepne
     mask_cache_dir: Path = Path("output/cache/masks")
     # kontrola jakosci maski (najwieksza spojna skladowa)
@@ -137,6 +180,7 @@ class AggregateConfig:
     eps_m: float = 2.5
     min_samples: int = 1
     weights: str = "equal"
+    min_views: int = 2          # obiekt z >= min_views widokami -> confirmed, inaczej single_view
 
 
 Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment")
@@ -174,7 +218,7 @@ class ZAnchorConfig:
 class PipelineConfig:
     photos_dir: Path = Path("zdjecia")
     odm_dir: Path = Path("odm_project")
-    model_path: Path = Path("LudzieiNamioty.pt")
+    model_path: Path = Path("models/LudzieiNamioty.pt")
     output_dir: Path = Path("output")
     images: list[str] = field(default_factory=lambda: ["SING0316.JPG"])
     dem: DemConfig = field(default_factory=DemConfig)
@@ -257,7 +301,7 @@ class PipelineConfig:
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
                 "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir"}
-_NESTED = {"dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
+_NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
            "surface": SurfaceConfig, "point": PointConfig}
 

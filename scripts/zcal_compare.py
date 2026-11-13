@@ -45,6 +45,9 @@ class CachedDetector:
         self._d = detector
         self._cache: dict[str, list] = {}
 
+    def __getattr__(self, name):      # names, task, imgsz... z opakowanego detektora
+        return getattr(self._d, name)
+
     def detect(self, image_path):
         key = str(image_path)
         if key not in self._cache:
@@ -224,8 +227,7 @@ def main() -> None:
         if not base_cfg.z_anchor.odm_dtm.exists():
             sys.exit("Brak DEM ODM i wstepnego DEM — uruchom: python scripts/pointcloud_to_dem.py")
         print("UWAGA: brak odm_dem/dtm.tif — uzywam WSTEPNEGO DEM z chmury punktow ODM\n")
-    detector = CachedDetector(Detector(base_cfg.model_path, conf=base_cfg.detect.conf,
-                                       classes=base_cfg.detect.classes))
+    detector = CachedDetector(Detector(base_cfg.model_path, base_cfg.detect))
 
     results: list[ModeResult] = []
     ctxs = {}

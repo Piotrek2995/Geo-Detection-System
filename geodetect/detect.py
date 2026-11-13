@@ -1,13 +1,30 @@
-"""Detekcja obiektow modelem YOLO (ultralytics). Model ladowany raz w __init__."""
+"""Detekcja obiektow modelem YOLO (ultralytics): model ladowany raz, klasy po nazwie.
+
+- Nazwy klas zawsze z model.names; konfiguracja (classes, conf_per_class, display_names,
+  colors, point.per_class) odwoluje sie do nazw — nieznana nazwa -> ValueError z lista
+  dostepnych klas.
+- imgsz domyslnie z treningu modelu (train_args.imgsz w checkpoincie); efektywna wartosc
+  jest logowana.
+- Model segmentacyjny (task=segment): kontury masek trafiaja do Detection.polygons
+  i zastepuja SAM w metodach punktu mask_* (geodetect.points).
+- Inferencja kafelkowa: cfg.tiling (geodetect/tiling.py).
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
+
+import numpy as np
+
+from .config import DetectConfig
 
 log = logging.getLogger(__name__)
+
+MODEL_SUFFIXES = (".pt",)
 
 
 @dataclass
@@ -15,7 +32,11 @@ class Detection:
     cls_id: int
     cls_name: str
     conf: float
-    bbox: tuple[float, float, float, float]  # x1, y1, x2, y2 [px]
+    bbox: tuple[float, float, float, float]  # x1, y1, x2, y2 [px] w ukladzie CALEGO zdjecia
+    polygons: Optional[list[np.ndarray]] = None   # kontury maski (model segmentacyjny)
+    source: str = "full"             # full | tile | merged (inferencja kafelkowa)
+    tile_truncated: bool = False     # box uciety na wewnetrznej krawedzi kafla (bez pary)
+    tile_index: Optional[int] = None  # indeks kafla (None = pelny obraz / scalony)
 
     @property
     def center(self) -> tuple[float, float]:
@@ -23,30 +44,182 @@ class Detection:
         return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
-class Detector:
-    def __init__(self, model_path: Path, conf: float = 0.25,
-                 classes: Optional[list[str]] = None, device: Optional[str] = None):
-        from ultralytics import YOLO  # import lazy — ciezki (torch)
-        self.model = YOLO(str(model_path))
-        self.names: dict[int, str] = dict(self.model.names)
-        self.conf = conf
-        self.device = device
-        self.class_ids: Optional[list[int]] = None
-        if classes:
-            by_name = {v: k for k, v in self.names.items()}
-            missing = [c for c in classes if c not in by_name]
-            if missing:
-                raise ValueError(f"Klas {missing} nie ma w modelu (dostepne: {list(by_name)})")
-            self.class_ids = [by_name[c] for c in classes]
-        log.info("YOLO: %s, klasy=%s", model_path, self.names)
+# ───────────── modele ─────────────
 
-    def detect(self, image_path: Path) -> list[Detection]:
-        result = self.model(str(image_path), conf=self.conf, classes=self.class_ids,
-                            device=self.device, verbose=False)[0]
+@dataclass
+class ModelInfo:
+    path: Path
+    name: str
+    task: str                        # detect | segment | ...
+    names: dict[int, str]
+    imgsz: Optional[int]             # z treningu (train_args.imgsz)
+    size_mb: float
+    date: Optional[str] = None
+    train_data: Optional[str] = None
+
+    @property
+    def label(self) -> str:
+        """Etykieta do listy rozwijanej w GUI."""
+        cls = ", ".join(self.names.values())
+        return f"{self.name} ({self.task}, imgsz {self.imgsz}, klasy: {cls})"
+
+
+def _imgsz_value(v) -> Optional[int]:
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple)):
+        return int(max(v))
+    return int(v)
+
+
+def model_info(path: Path | str) -> Optional[ModelInfo]:
+    """Metadane checkpointu ultralytics bez ladowania na GPU; None, gdy to nie jest
+    model YOLO (np. wagi SAM)."""
+    import torch
+    path = Path(path)
+    try:
+        ck = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        log.warning("Nie moge wczytac %s: %s", path, exc)
+        return None
+    if not isinstance(ck, dict) or "train_args" not in ck:
+        return None
+    model = ck.get("ema") or ck.get("model")
+    names = getattr(model, "names", None)
+    if not names:
+        return None
+    if isinstance(names, (list, tuple)):
+        names = dict(enumerate(names))
+    args = ck.get("train_args") or {}
+    task = args.get("task") or getattr(model, "task", None) or "detect"
+    return ModelInfo(path, path.name, str(task), {int(k): str(v) for k, v in names.items()},
+                     _imgsz_value(args.get("imgsz")), path.stat().st_size / 2 ** 20,
+                     ck.get("date"), args.get("data"))
+
+
+def list_models(folder: Path | str) -> list[ModelInfo]:
+    """Modele YOLO w folderze (pliki .pt), posortowane po nazwie; inne wagi pomijane."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    out = []
+    for p in sorted(folder.iterdir()):
+        if p.suffix.lower() in MODEL_SUFFIXES:
+            info = model_info(p)
+            if info is not None:
+                out.append(info)
+    return out
+
+
+def validate_class_names(names: Iterable[str], available: Iterable[str], what: str) -> None:
+    available = list(available)
+    missing = [n for n in names if n not in available]
+    if missing:
+        raise ValueError(f"{what}: klas {missing} nie ma w modelu (dostepne klasy: {available})")
+
+
+# ───────────── detektor ─────────────
+
+class Detector:
+    def __init__(self, model_path: Path, cfg: Optional[DetectConfig] = None):
+        from ultralytics import YOLO  # import lazy — ciezki (torch)
+        self.cfg = cfg or DetectConfig()
+        self.model_path = Path(model_path)
+        self.model = YOLO(str(model_path))
+        self.names: dict[int, str] = {int(k): v for k, v in dict(self.model.names).items()}
+        self.task = self.model.task
+        c = self.cfg
+        validate_class_names(c.class_list() or [], self.names.values(), "detect.classes")
+        validate_class_names(c.conf_per_class, self.names.values(), "detect.conf_per_class")
+        validate_class_names(c.display_names, self.names.values(), "detect.display_names")
+        validate_class_names(c.colors, self.names.values(), "detect.colors")
+        validate_class_names(c.tiling.classes or [], self.names.values(), "detect.tiling.classes")
+        by_name = {v: k for k, v in self.names.items()}
+        self.class_ids: Optional[list[int]] = (
+            None if c.class_list() is None else [by_name[n] for n in c.class_list()])
+        train_imgsz = _imgsz_value((getattr(self.model, "ckpt", None) or {}).get("train_args", {})
+                                   .get("imgsz")) or _imgsz_value(self.model.overrides.get("imgsz"))
+        self.imgsz = int(c.imgsz or train_imgsz or 640)
+        self.infer_s = 0.0
+        self.n_images = 0
+        log.info("YOLO: %s (task=%s), klasy=%s, imgsz=%d (%s), conf=%.2f%s, iou=%.2f, "
+                 "device=%s, half=%s, kafle=%s", self.model_path.name, self.task, self.names,
+                 self.imgsz, "z configu" if c.imgsz else "z treningu modelu", c.conf,
+                 f" per klasa {c.conf_per_class}" if c.conf_per_class else "", c.iou,
+                 c.device or "auto", c.half, c.tiling.enabled)
+
+    # -- surowe wywolanie modelu --
+    def _predict(self, sources: list, conf: float) -> list:
+        c = self.cfg
         out = []
-        for box in result.boxes:
-            cls_id = int(box.cls.item())
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            out.append(Detection(cls_id, self.names.get(cls_id, str(cls_id)),
-                                 float(box.conf.item()), (x1, y1, x2, y2)))
+        t0 = time.perf_counter()
+        for i in range(0, len(sources), max(1, c.batch)):
+            out.extend(self.model.predict(
+                sources[i:i + c.batch], imgsz=self.imgsz, conf=conf, iou=c.iou,
+                classes=self.class_ids, device=c.torch_device(), half=c.half,
+                max_det=c.max_det, verbose=False))
+        self.infer_s += time.perf_counter() - t0
         return out
+
+    def _min_conf(self) -> float:
+        return min([self.cfg.conf, *self.cfg.conf_per_class.values()])
+
+    def _to_detections(self, result, dx: float = 0.0, dy: float = 0.0) -> list[Detection]:
+        from .tiling import offset_polygons
+        out = []
+        polys = None
+        if getattr(result, "masks", None) is not None:
+            polys = [np.asarray(p, dtype=np.float64) for p in result.masks.xy]
+        for k, box in enumerate(result.boxes):
+            cls_id = int(box.cls.item())
+            name = self.names.get(cls_id, str(cls_id))
+            conf = float(box.conf.item())
+            if conf < self.cfg.conf_for(name):
+                continue
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            p = [polys[k]] if polys is not None and k < len(polys) and len(polys[k]) >= 3 else None
+            out.append(Detection(cls_id, name, conf, (x1 + dx, y1 + dy, x2 + dx, y2 + dy),
+                                 offset_polygons(p, dx, dy)))
+        return out
+
+    # -- API --
+    def detect(self, image_path: Path) -> list[Detection]:
+        return self.detect_many([image_path])[0]
+
+    def detect_many(self, image_paths: list[Path]) -> list[list[Detection]]:
+        """Detekcje dla wielu zdjec; bez kafli zdjecia ida do modelu paczkami po cfg.batch."""
+        self.n_images += len(image_paths)
+        if self.cfg.tiling.enabled:
+            return [self._detect_tiled(Path(p)) for p in image_paths]
+        res = self._predict([str(p) for p in image_paths], self._min_conf())
+        return [self._to_detections(r) for r in res]
+
+    def _detect_tiled(self, image_path: Path) -> list[Detection]:
+        import cv2
+        from dataclasses import replace
+        from .tiling import merge_detections, tile_grid, touches_interior_edge
+        tc = self.cfg.tiling
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise FileNotFoundError(image_path)
+        H, W = img.shape[:2]
+        tiles = tile_grid(W, H, int(tc.tile_size or self.imgsz), tc.overlap)
+        crops = [np.ascontiguousarray(img[t.y0:t.y1, t.x0:t.x1]) for t in tiles]
+        dets = []
+        tile_cls = set(tc.classes) if tc.classes else None
+        for i, (t, r) in enumerate(zip(tiles, self._predict(crops, self._min_conf()))):
+            for d in self._to_detections(r, t.x0, t.y0):
+                if tile_cls is not None and d.cls_name not in tile_cls:
+                    continue
+                dets.append(replace(d, source="tile", tile_index=i,
+                                    tile_truncated=touches_interior_edge(d.bbox, t, W, H,
+                                                                         tc.edge_margin_px)))
+        if tc.include_full or tile_cls is not None:
+            full = self._to_detections(self._predict([img], self._min_conf())[0])
+            if not tc.include_full:      # pelny obraz tylko dla klas spoza tiling.classes
+                full = [d for d in full if d.cls_name not in tile_cls]
+            dets += full
+        merged = merge_detections(dets, tc.nms_iou, tc.contain_ios, tiles)
+        log.debug("%s: %d kafli, %d detekcji surowych -> %d po scaleniu", image_path.name,
+                  len(tiles), len(dets), len(merged))
+        return merged
