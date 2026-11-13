@@ -181,10 +181,16 @@ def main() -> int:
     ap.add_argument("--thresholds", nargs="+", type=float, default=[0.25, 0.40, 0.50])
     ap.add_argument("--out", type=Path, default=ROOT / "output" / "detect")
     ap.add_argument("--no-timing", action="store_true")
+    ap.add_argument("--model", type=Path, default=None, help="model zamiast model_path z configu")
+    ap.add_argument("--gt-splits", nargs="+", default=None,
+                    help="dodatkowo P/R tylko na zdjeciach z tych splitow GT (np. valid test)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
     base = PipelineConfig.from_file(args.config)
+    if args.model is not None:
+        base.model_path = args.model.resolve()
+    print(f"Model: {base.model_path}")
     rec_images = build_context(base, detector=FixedDetector({}, {})).reconstruction.image_names
     images = [n for n in rec_images if (base.photos_dir / n).exists()]
     all_dets, per_img_s, names = {}, {}, None
@@ -219,15 +225,21 @@ def main() -> int:
         for c in classes:
             print(f"  {v:12} {c:7} {conf_stats(all_dets[v], c, 0.25)}")
 
-    if gt:
-        print(f"\nPrecision / recall na {len(gt)} zdjeciach z GT "
+    gt_sets = [("wszystkie", gt)]
+    if gt and args.gt_splits:
+        sub_gt = {k: g for k, g in gt.items() if g.split in args.gt_splits}
+        gt_sets.append(("+".join(args.gt_splits) + ": " + ", ".join(sorted(sub_gt)), sub_gt))
+    for label, gts in gt_sets:
+        if not gts:
+            continue
+        print(f"\nPrecision / recall na {len(gts)} zdjeciach z GT [{label}] "
               "(TP/FP/FN, P, R; IoU 0.5, people takze 0.3):")
         for v in VARIANTS:
             for thr in args.thresholds:
                 parts = []
                 for c in classes:
                     for it in ((0.5, 0.3) if c == "people" else (0.5,)):
-                        tp, fp, fn, p, r = prf(all_dets[v], gt, thr, it, c)
+                        tp, fp, fn, p, r = prf(all_dets[v], gts, thr, it, c)
                         parts.append(f"{c}@{it}: {tp}/{fp}/{fn} P {p:.2f} R {r:.2f}")
                 print(f"  {v:12} conf>={thr:.2f}  " + " | ".join(parts))
 
