@@ -11,6 +11,7 @@ detections_map.html
 nmt/
 odm_project/
 data/
-# modele: tylko LudzieiNamioty.pt jest w repo (pozostale wagi pobierane / lokalne)
+# modele: w repo LudzieiNamioty.pt i MODEL5.pt (domyslny); pozostale wagi pobierane / lokalne
 *.pt
 !models/LudzieiNamioty.pt
+!models/MODEL5.pt

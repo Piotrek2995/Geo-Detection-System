@@ -1,0 +1,32 @@
+# Detekcja: dwa modele x (bez kafli / kafle + pełny obraz), ocena względem etykiet v7
+# (dawniej scripts/detect_compare.py).
+# Uruchomienie: python scripts/run_experiment.py experiments/detect.yaml
+name: detect
+description: >
+  LudzieiNamioty (trenowany na v4 — zdjęcia SING03xx niezależne) i MODEL5 (trenowany na
+  eksporcie v7 — zdjęcia ze splitu train to wyciek). Próg conf 0.25 dla wszystkich klas
+  na etapie detekcji; P/R/F1 liczone przy progach z eval.thresholds. Georeferencja:
+  nmt_local, dem_alignment, eps 10 m.
+base_config: ../config.yaml
+overrides:
+  detect.conf: 0.25
+  detect.conf_per_class: {}
+  detect.half: false
+  detect.tiling.classes: null
+  detect.tiling.include_full: true
+  surface.source: nmt_local
+  z_anchor.mode: dem_alignment
+  aggregate.eps_m: 10.0
+variants:
+  - name: LudzieiNamioty bez kafli
+    set: {model: models/LudzieiNamioty.pt, detect.tiling.enabled: false}
+  - name: LudzieiNamioty kafle+pełny
+    set: {model: models/LudzieiNamioty.pt, detect.tiling.enabled: true}
+  - name: MODEL5 bez kafli
+    set: {model: models/MODEL5.pt, detect.tiling.enabled: false}
+  - name: MODEL5 kafle+pełny
+    set: {model: models/MODEL5.pt, detect.tiling.enabled: true}
+reference: LudzieiNamioty bez kafli
+metrics:
+  ground_truth: true
+  missing_label_conf: 0.7

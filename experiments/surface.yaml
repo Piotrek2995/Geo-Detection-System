@@ -1,0 +1,21 @@
+# Źródła powierzchni ray castingu (dawniej scripts/surface_compare.py) + analiza drzew/NMPT.
+# Uruchomienie: python scripts/run_experiment.py experiments/surface.yaml
+name: surface
+description: >
+  Ta sama kalibracja Z (dem_alignment względem NMT z sekcji dem), te same detekcje;
+  zmienia się tylko powierzchnia, na którą rzutowany jest promień. Dodatkowo: czy któryś
+  promień przechodził nad/przez pokrycie terenu (NMPT − NMT > 2 m) przed trafieniem w NMT.
+base_config: ../config.yaml
+overrides:
+  model: models/LudzieiNamioty.pt
+  detect.tiling.enabled: false
+  detect.conf_per_class: {}
+  z_anchor.mode: dem_alignment
+  point.method: bbox_center
+  point.per_class: {}
+  aggregate.eps_m: 10.0
+axes:
+  surface.source: [nmt_gugik_rest, nmt_local, nmpt_local, odm_dsm]
+reference: nmt_gugik_rest
+metrics:
+  tree_profile: {cover_threshold_m: 2.0, step_m: 0.5, n_plots: 3}

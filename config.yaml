@@ -3,7 +3,7 @@
 
 photos_dir: zdjecia
 odm_dir: odm_project          # wynik OpenDroneMap (opensfm/reconstruction.json, reference_lla.json)
-model_path: models/LudzieiNamioty.pt
+model_path: models/MODEL5.pt     # modele: folder models/ (LudzieiNamioty.pt — starszy, v4)
 output_dir: output
 
 # Jedno zdjecie (string) albo lista
@@ -19,13 +19,17 @@ dem:
   cache_path: output/cache/gugik_nmt.json   # cache probek GUGiK na dysku (null = tylko w pamieci)
 
 # Detekcja YOLO. Klasy zawsze po NAZWIE z model.names (nieznana nazwa -> blad z lista
-# dostepnych). Domyslne wartosci dobrane w scripts/detect_compare.py (README, "Detekcja"):
-# kafle tylko dla people (recall 0.65 -> 0.85 przy P 1.00), namioty z pelnego obrazu
-# (kafle dokladaly falszywe namioty w krzakach).
+# dostepnych). Porownanie modeli i wariantow: experiments/detect.yaml (docs/experiments.md).
+# MODEL5 bez kafli: kafle nie pomagaja (skala obiektow w kaflu inna niz w treningu),
+# zostaja jako opcja (tiling.enabled / tiling.classes) dla modeli trenowanych na wycinkach.
 detect:
   conf: 0.25
+  # Progi z rozkladu conf TP/FP (experiments/detect.yaml): ludzie nisko (prawdziwa lezaca
+  # osoba miala 0.31), namioty wyzej — FP w krzakach 0.38-0.58, TP obu modeli >= 0.68.
+  # Dach domu (FP namiot, conf 0.74-0.84) nie da sie odciac progiem bez ryzyka dla TP.
   conf_per_class:
-    people: 0.5
+    namiot: 0.6
+    people: 0.25
   classes: all                # all | lista nazw, np. [namiot, people]
   display_names:              # nazwy na mapie / w eksporcie
     namiot: namiot
@@ -40,7 +44,7 @@ detect:
   max_det: 300
   batch: 8
   tiling:
-    enabled: true
+    enabled: false
     classes: [people]         # klasy z kafli; pozostale tylko z pelnego obrazu
     tile_size: null           # null = imgsz
     overlap: 0.2
@@ -82,7 +86,7 @@ surface:
 # mask_ground_contact | mask_footprint_median; mask_* uzywaja SAM (prompt = bbox YOLO).
 # per_class nadpisuje method dla klasy. Maska odrzucona -> bbox_center (adnotacja w wynikach).
 point:
-  # Domyslnie (wyniki scripts/point_compare.py): namioty bbox_center — najmniejszy rozrzut
+  # Domyslnie (wyniki experiments/point.yaml): namioty bbox_center — najmniejszy rozrzut
   # bez SAM; ludzie bbox_bottom_center — stopy to punkt na gruncie, a srodek bboxa stojacej
   # osoby jest ~0.9 m nad nim (przesuniecie ~0.75 m wzdluz promienia).
   method: bbox_center
@@ -119,6 +123,18 @@ aggregate:
   min_views: 2                # >= min_views widokow -> confirmed, inaczej single_view
   weights: equal              # equal | conf | cos_incidence
 
+# Ocena detekcji wzgledem etykiet (experiments/detect.yaml). Eksport Roboflow v7
+# (train/valid/test). MODEL5 trenowano na tym eksporcie -> zdjecia ze splitu train sa
+# raportowane osobno (wyciek), valid+test to zbior uczciwy.
+eval:
+  labels_dir: C:/Users/pc/PycharmProjects/PYTORCH/28sierpniaMODEL5
+  train_images: [SING0303.JPG, SING0304.JPG, SING0305.JPG, SING0306.JPG, SING0315.JPG,
+                 SING0316.JPG, SING0317.JPG, SING0318.JPG, SING0321.JPG, SING0324.JPG,
+                 SING0325.JPG, SING0326.JPG, SING0328.JPG, SING0329.JPG]
+  leaky_models: [MODEL5.pt]   # modele trenowane na tym eksporcie (dla innych wszystko jest uczciwe)
+  iou: 0.5
+  thresholds: [0.25, 0.5]
+
 # Kalibracja wysokosci: H [m npm] = h_ODM + z_offset. Potensic zapisuje GPS Altitude jako
 # AGL od punktu startu, wiec wysokosci w ODM (kamery, chmura, DEM ODM) nie sa npm.
 z_anchor:
@@ -128,7 +144,7 @@ z_anchor:
   #                  z_offset = NMT(xy anchora) + lens_height_m - h anchora w ODM
   # dem_alignment  — DEM z ODM (odm_dem/dtm.tif, dsm.tif) dopasowany do NMT:
   #                  z_offset = mediana(NMT - DEM_ODM) w otwartym terenie
-  # (multiview_check to tylko diagnostyka: scripts/zcal_compare.py)
+  # (multiview_check to tylko diagnostyka: experiments/zcal.yaml)
   mode: dem_alignment
   agl_m: 45.0
   # ground_frame

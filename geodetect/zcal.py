@@ -304,6 +304,10 @@ def calibrate_z(config: PipelineConfig, dem: DemSampler, rec: OdmReconstruction,
         return ground_frame(rec, za.image, dem, frame, za.lens_height_m)
     if za.mode == "dem_alignment":
         return dem_alignment(za, config.odm_dtm_path, config.odm_dsm_path, dem, rec, frame)
+    if za.mode == "fixed":
+        if za.offset_m is None:
+            raise ValueError("z_anchor.mode=fixed wymaga z_anchor.offset_m")
+        return ZCalibration(float(za.offset_m), "fixed", stats={"source": za.fixed_label})
     if za.mode == "multiview_check":
         raise ValueError("multiview_check to tylko diagnostyka (geodetect.diagnostics."
                          "multiview_z_scan), nie tryb kalibracji wynikow")

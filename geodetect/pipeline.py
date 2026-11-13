@@ -92,10 +92,14 @@ class ImageResult:
     misses: list[Detection] = field(default_factory=list)  # bez przeciecia z DEM
 
 
-def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -> PipelineContext:
+def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
+                  dem: Optional[DemSampler] = None, reconstruction: Optional[OdmReconstruction] = None,
+                  surface: Optional[Surface] = None) -> PipelineContext:
+    """Kontekst przetwarzania. dem / reconstruction / surface mozna podac gotowe
+    (wspoldzielone miedzy wariantami eksperymentu), inaczej sa budowane z configu."""
     config.point.validate()
-    dem = resolve_dem(config.dem)
-    rec = OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
+    dem = dem if dem is not None else resolve_dem(config.dem)
+    rec = reconstruction if reconstruction is not None else         OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
     base_frame = EnuFrame(rec.ref)
     # DECYZJA METODYCZNA: z_offset liczony raz, wzgledem NMT referencyjnego (sekcja `dem`),
     # niezaleznie od powierzchni ray castingu (sekcja `surface`). Gdyby kalibracja zalezala
@@ -105,7 +109,8 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None) -
     log.info("Kalibracja Z — %s", z_cal.describe())
     cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
                      for n in rec.image_names])
-    surface = build_surface(config, area_bounds_2180(config, cams), ref_dem=dem)
+    if surface is None:
+        surface = build_surface(config, area_bounds_2180(config, cams), ref_dem=dem)
     log.info("Powierzchnia ray castingu: %s (uklad wysokosci %s, krok %.2f m)", surface.name,
              surface.vertical, config.raycast.step_for(surface.resolution_m))
     if detector is None:

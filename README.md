@@ -85,8 +85,8 @@ dostaje `confirmed`.
 
 ### Detekcja (`detect`)
 
-- **Modele** leżą w `models/`. W repo jest tylko `models/LudzieiNamioty.pt`, pozostałe
-  wagi (`*.pt`, w tym SAM) są w `.gitignore`. `geodetect.detect.list_models("models")`
+- **Modele** leżą w `models/`. W repo są `models/MODEL5.pt` (domyślny) i
+  `models/LudzieiNamioty.pt`, pozostałe wagi (`*.pt`, w tym SAM) są w `.gitignore`. `geodetect.detect.list_models("models")`
   zwraca metadane do listy wyboru w GUI: plik, `task` (detect / segment), `names`, `imgsz`
   z treningu, rozmiar i datę. Wagi spoza YOLO (np. SAM) są pomijane. Model
   segmentacyjny (`task=segment`) daje kontury masek: metody `mask_*` z sekcji `point`
@@ -119,29 +119,42 @@ dostaje `confirmed`.
   SAHI odpadło, bo nie odróżnia boxa uciętego od pełnego. Ucięty box przesuwa środek
   obiektu, a więc i georeferencję.
 
-Ocena wariantów (`scripts/detect_compare.py`, 26 zdjęć, nmt_local, eps 10 m). Precision
-i recall policzone na **20 zdjęciach z etykietami** z eksportu Roboflow `namioty_nasze` v7
-(`PYTORCH/28sierpniaMODEL5`). Etykiety są niezależne od modelu: `LudzieiNamioty.pt`
-trenowano 30.03.2026 na v4 (`dataset_yolo26`), w którym tych zdjęć nie ma. Z wersji
-z augmentacją wybierana jest ta bez obrotu (rejestracja ORB, `geodetect/gt_labels.py`).
+Ocena modeli i wariantów: `experiments/detect.yaml` (docs/experiments.md). Używa 26 zdjęć,
+nmt_local i eps 10 m. Precision i recall liczone są na **20 zdjęciach z etykietami**
+z eksportu Roboflow `namioty_nasze` v7 (`PYTORCH/28sierpniaMODEL5`, sekcja `eval`
+w config.yaml):
 
-| wariant (conf people) | namiot P / R | people P / R (IoU 0,5) | ms/zdjęcie (fp16) |
-|---|---|---|---|
-| bez kafli (0,25) | 0,95 / 1,00 | 0,93 / 0,65 | 60 |
-| kafle (0,25) | 0,87 / 1,00 | 0,82 / 0,90 | 88 |
-| kafle + pełny (0,25) | 0,83 / 1,00 | 0,83 / 0,95 | 102 |
-| kafle + pełny (0,50) | 0,87 / 1,00 | 1,00 / 0,85 | 102 |
-| **kafle tylko dla people + pełny (0,50)** | **0,95 / 1,00** | **1,00 / 0,85** | 102 |
+- `LudzieiNamioty.pt` trenowano na v4, w którym tych zdjęć nie ma, więc wszystkie
+  wyniki są uczciwe.
+- `MODEL5.pt` trenowano na v7. Zdjęcia ze splitu train (14) to **wyciek**; uczciwe są
+  tylko valid+test (6 zdjęć).
 
-Kafle wyraźnie poprawiają recall ludzi, bo osoba ma na pełnym obrazie 15–50 px. Namiotom
-dokładają tylko fałszywe alarmy w krzakach nad strumieniem. Stąd domyślnie: kafle tylko
-dla `people`, namioty z pełnego obrazu, `conf_per_class.people: 0.5`, fp16. Jedyny
-fałszywy namiot w każdym wariancie to dach domu (SING0310 i SING0312). Ma 2 widoki, więc
-jest `confirmed`, i to jest „drugi namiot” z ocen w zadaniach 4–5. Podglądy detekcji
-różniących się od wariantu bez kafli zapisuje skrypt w `output/detect/`.
+Summary podaje zawsze obie wersje liczb. IoU 0,5, conf ≥ 0,25:
+
+| wariant | namiot P / R (wszystkie) | people P / R (wszystkie) | namiot P / R (valid+test) | people P / R (valid+test) |
+|---|---|---|---|---|
+| LudzieiNamioty bez kafli | 0,95 / 1,00 | 0,93 / 0,65 | 0,86 / 1,00 | 1,00 / 1,00 |
+| LudzieiNamioty kafle + pełny | 0,83 / 1,00 | 0,83 / 0,95 | 0,86 / 1,00 | 1,00 / 1,00 |
+| MODEL5 bez kafli ⚠ | 0,95 / 1,00 | 1,00 / 0,95 | 0,86 / 1,00 | 1,00 / 0,83 |
+| MODEL5 kafle + pełny ⚠ | 0,91 / 1,00 | 0,95 / 1,00 | 0,75 / 1,00 | 0,86 / 1,00 |
+
+Domyślnie: **MODEL5 bez kafli**. Kafle pomagały ludziom w LudzieiNamioty (recall 0,65 →
+0,95), ale MODEL5 widzi ludzi z pełnego obrazu. Na zbiorze uczciwym kafle dokładają mu
+tylko fałszywe alarmy (skala obiektu w kaflu inna niż w treningu). Kafle zostają opcją
+(`tiling.enabled`, `tiling.classes`).
+
+Progi per klasa wynikają z rozkładu conf TP i FP:
+
+- `people: 0.25` — prawdziwa leżąca osoba miała 0,31;
+- `namiot: 0.6` — FP w krzakach mają 0,38–0,58, a TP obu modeli ≥ 0,68.
+
+Jedyny fałszywy namiot bez kafli to dach domu (SING0310 i SING0312, conf 0,74–0,84). Ma
+2 widoki, więc jest `confirmed`, i to jest „drugi namiot” z ocen w zadaniach 4–5. Progiem
+nie da się go bezpiecznie odciąć. FP z conf > 0,7 trafiają do
+`possible_missing_labels/`, bo mogą to być brakujące etykiety.
 
 ```powershell
-python scripts/detect_compare.py --gt C:/Users/pc/PycharmProjects/PYTORCH/28sierpniaMODEL5
+python scripts/run_experiment.py experiments/detect.yaml
 ```
 
 ### Kalibracja wysokości (`z_anchor`)
@@ -165,10 +178,10 @@ i wskazać go w `z_anchor.odm_dtm` / `odm_dsm`:
 
 ```powershell
 python scripts/pointcloud_to_dem.py          # -> output/cache/odm_pc_dtm.tif, odm_pc_dsm.tif
-python scripts/zcal_compare.py               # porównanie trybów + wykresy w output/zcal/
+python scripts/run_experiment.py experiments/zcal.yaml   # porównanie trybów (docs/experiments.md)
 ```
 
-`zcal_compare.py` dodatkowo uruchamia **diagnostykę `multiview_check`**. Jest to skan
+Eksperyment `zcal` zawiera też wariant z **diagnostyką `multiview_check`**: **diagnostykę `multiview_check`**. Jest to skan
 `z_offset` w zakresie ±15 m, który minimalizuje rozrzut statycznych namiotów. Służy tylko
 jako niezależna kontrola, a nie do kalibracji wyników, bo ten sam rozrzut jest potem
 miarą jakości. Optimum jest zaniżone o wysokość punktu reprezentatywnego nad gruntem
@@ -227,8 +240,16 @@ w m npm.
 python scripts/check_surface_coverage.py                  # zasięg, rozdzielczość, dziury
 python main.py --all --surface nmt_local --eps 10
 python main.py --all --surface nmpt_local --eps 10
-python scripts/surface_compare.py --eps 10                # tabela dla wszystkich źródeł
+python scripts/run_experiment.py experiments/surface.yaml   # wszystkie źródła + analiza drzew
 ```
+
+**Drzewa i NMPT (lot testowy).** Pokrycie NMPT − NMT > 2 m zajmuje 18% obszaru lotu.
+Z 46 promieni 20 przechodzi nad koronami drzew, ale z prześwitem co najmniej 7 m, więc
+NMT i NMPT dają to samo trafienie (≤ 0,06 m). Przez korony przechodzą tylko 2 promienie
+i oba prowadzą do fałszywego „namiotu” na dachu domu (SING0310, SING0312). Na NMPT
+trafienie wypada wtedy 17–31 m bliżej, w koronie drzewa (profil `ray_profile_*.png`).
+Na otwartym terenie wybór NMT czy NMPT nie ma znaczenia. Przy obiektach za drzewami NMPT
+zatrzyma promień na koronie, a NMT poprowadzi go dalej, do gruntu.
 
 ### Punkt reprezentatywny (`point`)
 
@@ -265,11 +286,11 @@ Promień idzie przez jeden piksel detekcji (albo przez wiele pikseli). Piksel wy
 Geometrię styku z gruntem opisuje docstring `geodetect/points.py`. Ocena metod:
 
 ```powershell
-python scripts/point_compare.py                 # nmt_local, eps 10 m; --cold mierzy SAM bez cache
+python scripts/run_experiment.py experiments/point.yaml   # nmt_local, eps 10 m
 ```
 
-Skrypt zapisuje tabelę na stdout oraz pliki w `output/points/`: `spread_by_method.png`,
-`zoffset_by_method.png` i `preview_*.png` (bbox, maska, piksele każdej metody, kierunek pionu).
+Wynik trafia do `output/experiments/point/<data>/`: `summary.md`, `multiview.png` oraz
+`point_previews/` (bbox, maska, piksele każdej metody, kierunek pionu).
 
 **Wyniki (lot testowy).** Najmniejszy rozrzut namiotu dają metody przez środek bryły:
 `bbox_center` (RMS 0,39 m), `mask_footprint_median` (0,44 m) i `mask_centroid` (0,50 m).
@@ -286,7 +307,7 @@ stojąca ma mały rzut poziomy, a środek jej bboxa jest ok. 0,9 m nad gruntem.
 ```powershell
 python -m unittest discover -s tests -t . -v      # testy jednostkowe (offline)
 python scripts/compare_legacy.py                  # prototyp vs pakiet (GPU + internet)
-python scripts/zcal_compare.py                    # tryby kalibracji Z (GPU + internet)
+python scripts/run_experiment.py experiments/*.yaml   # eksperymenty (GPU + internet), docs/experiments.md
 ```
 
 ### Znany problem: `PROJ_LIB` z PostgreSQL/PostGIS
@@ -320,16 +341,18 @@ geodetect/
   aggregate.py  DBSCAN, AggregatedObject (pozycja ważona, widoki, rozrzut)
   export.py     GeoJSON, CSV, mapa folium z warstwami, wykres rozrzutu
   diagnostics.py residua wzdłuż/w poprzek promienia, multiview_check (skan z_offset)
+  experiments.py eksperymenty z YAML: warianty, cache detekcji, metryki, summary.md
+  expplots.py   wykresy i podglądy eksperymentów
 main.py         CLI
 config.yaml     przykładowa konfiguracja
 legacy/         zamrożony prototyp z raportu 1 (do porównań)
-scripts/        compare_legacy.py — prototyp vs pakiet; zcal_compare.py — tryby kalibracji Z;
+scripts/        run_experiment.py — eksperymenty z experiments/*.yaml;
+                compare_legacy.py — prototyp vs pakiet;
                 pointcloud_to_dem.py — wstępny DTM/DSM z chmury punktów ODM;
-                check_surface_coverage.py — pokrycie arkuszy NMT/NMPT;
-                surface_compare.py — zestawienie źródeł powierzchni;
-                point_compare.py — ocena metod punktu reprezentatywnego;
-                detect_compare.py — warianty detekcji (kafle, progi), P/R z etykiet
-models/         wagi modeli (w repo tylko LudzieiNamioty.pt)
+                check_surface_coverage.py — pokrycie arkuszy NMT/NMPT
+experiments/    zcal.yaml, surface.yaml, point.yaml, detect.yaml (docs/experiments.md)
+docs/           experiments.md — format eksperymentów i opis metryk
+models/         wagi modeli (w repo LudzieiNamioty.pt i MODEL5.pt)
 tests/          testy jednostkowe
 ODM.md          instrukcja OpenDroneMap
 PROGRES/        raporty postępu

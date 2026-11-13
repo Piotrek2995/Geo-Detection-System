@@ -1,0 +1,30 @@
+# Kalibracja Z: tryby z_anchor (dawniej scripts/zcal_compare.py).
+# Uruchomienie: python scripts/run_experiment.py experiments/zcal.yaml
+name: zcal
+description: >
+  Porównanie trybów kalibracji wysokości (z_anchor) na wszystkich zdjęciach lotu.
+  Powierzchnia NMT REST GUGiK, punkt bbox_center, DBSCAN eps 10 m. Wariant multiview_check
+  używa z_offset minimalizującego rozrzut namiotów w batchu agl_assumption (skan ±15 m,
+  krok 0.25 m) — to diagnostyka, nie tryb kalibracji.
+base_config: ../config.yaml
+overrides:
+  model: models/LudzieiNamioty.pt      # model z oryginalnego porównania (bez wycieku GT)
+  detect.tiling.enabled: false
+  detect.conf_per_class: {}
+  surface.source: nmt_gugik_rest
+  point.method: bbox_center
+  point.per_class: {}
+  aggregate.eps_m: 10.0
+variants:
+  - name: agl_assumption
+    set: {z_anchor.mode: agl_assumption}
+  - name: dem_alignment
+    set: {z_anchor.mode: dem_alignment, z_anchor.apply_tilt: false}
+  - name: dem_alignment+tilt
+    set: {z_anchor.mode: dem_alignment, z_anchor.apply_tilt: true}
+  - name: multiview_check
+    derive: {z_offset: multiview_check, from: agl_assumption, span_m: 15.0, step_m: 0.25}
+reference: dem_alignment
+metrics:
+  min_views_scan: 3
+  dem_alignment_plot: true

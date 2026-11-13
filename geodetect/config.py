@@ -183,7 +183,7 @@ class AggregateConfig:
     min_views: int = 2          # obiekt z >= min_views widokami -> confirmed, inaczej single_view
 
 
-Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment")
+Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment", "fixed")
 
 
 @dataclass
@@ -197,6 +197,8 @@ class ZAnchorConfig:
                        z_offset = NMT(xy) + lens_height_m - h kamery anchora,
       dem_alignment  — dopasowanie DEM z ODM (odm_dtm / odm_dsm) do NMT:
                        z_offset = mediana(NMT - DEM_ODM) w punktach otwartego terenu.
+      fixed          — z_offset = offset_m podany wprost (np. wynik zewnetrznego pomiaru
+                       albo diagnostyki multiview_check w eksperymentach).
     Diagnostyka multiview_check (geodetect.zcal.multiview_z_scan) nie jest trybem kalibracji.
     """
     mode: str = "agl_assumption"
@@ -212,6 +214,25 @@ class ZAnchorConfig:
     max_dsm_dtm_m: float = 0.5      # gdy sa oba DEM-y: tylko otwarty teren
     apply_tilt: bool = False        # stosowac takze dopasowana plaszczyzne (domyslnie tylko offset)
     seed: int = 0
+    # fixed
+    offset_m: Optional[float] = None
+    fixed_label: str = "podany w configu"
+
+
+@dataclass
+class EvalConfig:
+    """Ocena detekcji wzgledem etykiet (ground truth).
+
+    labels_dir: eksport Roboflow/YOLO (train/valid/test z images/ i labels/), None = brak GT.
+    train_images: zdjecia, ktore byly w zbiorze TRENINGOWYM ocenianego modelu (wyciek
+    danych) — raportowane osobno; leaky_models: modele (nazwy plikow), dla ktorych ta
+    lista obowiazuje (trenowane na tym eksporcie). Dla pozostalych modeli wszystkie
+    zdjecia z etykietami sa zbiorem uczciwym."""
+    labels_dir: Optional[Path] = None
+    train_images: list[str] = field(default_factory=list)
+    leaky_models: list[str] = field(default_factory=list)
+    iou: float = 0.5
+    thresholds: list[float] = field(default_factory=lambda: [0.25, 0.5])
 
 
 @dataclass
@@ -229,6 +250,7 @@ class PipelineConfig:
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
     surface: SurfaceConfig = field(default_factory=SurfaceConfig)
     point: PointConfig = field(default_factory=PointConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
 
     # ── pochodne sciezki ODM ──
     @property
@@ -296,14 +318,15 @@ class PipelineConfig:
         self.surface.odm_dsm = res(self.surface.odm_dsm)
         self.point.mask_cache_dir = res(self.point.mask_cache_dir)
         self.point.sam_model = res(self.point.sam_model)
+        self.eval.labels_dir = res(self.eval.labels_dir)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
-                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir"}
+                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir", "labels_dir"}
 _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
-           "surface": SurfaceConfig, "point": PointConfig}
+           "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig}
 
 
 def _build(cls, data: dict[str, Any]):

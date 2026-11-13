@@ -90,13 +90,22 @@ class ZScan:
     n_detections: int
 
     @property
+    def valid(self) -> bool:
+        """False, gdy zaden offset nie dal >= 2 trafien na obiekt (za malo widokow)."""
+        return bool(np.isfinite(self.rms).any())
+
+    @property
     def best_offset(self) -> float:
+        if not self.valid:
+            return float("nan")
         return float(self.offsets[int(np.nanargmin(self.rms))])
 
     @property
     def refined_offset(self) -> float:
         """Minimum paraboli dopasowanej do 5 punktow wokol najlepszego offsetu
         (dokladnosc ponizej kroku skanu); best_offset, gdy dopasowanie niemozliwe."""
+        if not self.valid:
+            return float("nan")
         i = int(np.nanargmin(self.rms))
         lo, hi = max(0, i - 2), min(len(self.rms), i + 3)
         x, y = self.offsets[lo:hi], self.rms[lo:hi]
@@ -110,7 +119,7 @@ class ZScan:
 
     @property
     def best_rms(self) -> float:
-        return float(np.nanmin(self.rms))
+        return float(np.nanmin(self.rms)) if self.valid else float("nan")
 
 
 def multiview_z_scan(batch: BatchResult, ctx: PipelineContext, span_m: float = 15.0,

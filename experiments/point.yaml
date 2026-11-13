@@ -1,0 +1,24 @@
+# Punkt reprezentatywny detekcji (dawniej scripts/point_compare.py).
+# Uruchomienie: python scripts/run_experiment.py experiments/point.yaml
+name: point
+description: >
+  Metody wyboru piksela, przez który idzie promień (bbox / maska SAM), na nmt_local,
+  eps 10 m. Dla każdej metody multiview_check (skan ±3 m, krok 0.05 m) — o ile optimum
+  z_offset odbiega od dem_alignment (metoda przesunięta systematycznie wzdłuż promienia
+  daje inne optimum).
+base_config: ../config.yaml
+overrides:
+  model: models/LudzieiNamioty.pt
+  detect.tiling.enabled: false
+  detect.conf_per_class: {}
+  surface.source: nmt_local
+  z_anchor.mode: dem_alignment
+  point.per_class: {}
+  aggregate.eps_m: 10.0
+axes:
+  point.method: [bbox_center, bbox_bottom_center, mask_centroid, mask_ground_contact,
+                 mask_footprint_median]
+reference: bbox_center
+metrics:
+  multiview: {span_m: 3.0, step_m: 0.05, max_rays: 30}
+  point_previews: 6
