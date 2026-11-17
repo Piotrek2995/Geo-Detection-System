@@ -713,6 +713,9 @@ class ExperimentRunner:
             (vr.dir / "config.yaml").write_text(
                 yaml.safe_dump(vr.cfg.to_dict(), allow_unicode=True, sort_keys=False), encoding="utf-8")
             export_all(vr.batch, vr.dir)
+            if getattr(vr.ctx, "alignment", None) is not None:
+                (vr.dir / "alignment.json").write_text(json.dumps(vr.ctx.alignment.result.report(), indent=2),
+                                                       encoding="utf-8")
 
         plots = {}
         mains = [{"variant": n, **({k: vr.main[k] for k in ("rms", "max", "along", "across")}
@@ -906,6 +909,16 @@ class ExperimentRunner:
                 ov += f", z_offset z multiview_check wariantu `{v.derive['from']}`"
             L.append(f"| {v.name} | {ov} |")
         L.append("")
+
+        seen = set()
+        for n, vr in self.results.items():
+            al = getattr(vr.ctx, "alignment", None)
+            if al is None or id(al) in seen:
+                continue
+            seen.add(id(al))
+            from .align import alignment_md
+            used = [m for m, v in self.results.items() if getattr(v.ctx, "alignment", None) is al]
+            L += alignment_md(al, f"Wyrównanie 7p do NMPT — {', '.join(used)}")
 
         so = spec.static_classes[0]
         L += [f"## Wyniki — główny obiekt statyczny ({so}, confirmed, najwięcej widoków)", "",

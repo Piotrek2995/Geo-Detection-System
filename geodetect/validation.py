@@ -205,7 +205,10 @@ class ReferenceReport:
 
 def _variant_axes(vr) -> dict:
     c = vr.cfg
-    return {"surface": c.surface.source, "z_mode": c.z_anchor.mode,
+    z = c.z_anchor.mode
+    if c.georef.mode != "gps_only":
+        z = "7p" + ("" if c.georef.use_baro_prior else " bez baro")
+    return {"surface": c.surface.source, "z_mode": z,
             "pixel": {"manual": "manual", "csv": "detekcja_best"}.get(c.detect.source, "detekcja")}
 
 
@@ -250,16 +253,27 @@ def build_report(runner) -> ReferenceReport:
            # georeferencji rekonstrukcji)
            "odm": tuple(rep.transfer["ball_odm"]) if rep.transfer else None}
 
-    def err_to(key, x, y):
-        g = gts[key]
+    def err_to(key, x, y, g_over=None):
+        g = (g_over or gts)[key]
         return math.hypot(x - g[0], y - g[1]) if g else float("nan")
     rep.roof = {"nmt": sample(nmt, gx, gy), "nmpt": sample(nmpt, gx, gy)}
     rep.roof["roof_h_nmpt"] = rep.roof["nmpt"] - rep.roof["nmt"]
 
+    base_gts = gts
     for name, vr in runner.results.items():
         ax = _variant_axes(vr)
         fr = vr.ctx.frame
-        dsm_gt, dtm_gt = sample(dsm, gx, gy, fr), sample(dtm, gx, gy, fr)
+        al = getattr(vr.ctx, "alignment", None)
+        gts = dict(base_gts)
+        if al is not None:
+            # georef.mode=similarity_nmpt: model ODM (DSM/DTM, pilka na ortofotomapie ODM) w ukladzie
+            # wyrownanym — odniesienie "odm" przeliczone ta sama transformacja 7p
+            dsm_gt = al.model_H(al.dsm_path, gx, gy)
+            dtm_gt = al.model_H(vr.cfg.odm_dtm_path, gx, gy) if Path(vr.cfg.odm_dtm_path).exists() else float("nan")
+            if base_gts["odm"]:
+                gts["odm"] = tuple(al.map_odm_point(*base_gts["odm"])[:2])
+        else:
+            dsm_gt, dtm_gt = sample(dsm, gx, gy, fr), sample(dtm, gx, gy, fr)
         cams = {r.image_name: r.camera for r in vr.batch.images}
         recs = []
         for gd in vr.batch.detections:
@@ -393,6 +407,44 @@ def plot_error_vs(rep: ReferenceReport, key: str, xlabel: str, path: Path, nmt_p
     return _save(fig, plt, path, f"Błąd poziomy pozycji piłki a {xlabel.split(' [')[0]}")
 
 
+_GEOPORTAL = "https://mapy.geoportal.gov.pl/wss/service"
+_KIEG = "https://integracja.gugik.gov.pl/cgi-bin/KrajowaIntegracjaEwidencjiGruntow"
+
+
+def add_basemaps(m) -> None:
+    """Podklady mapy wynikowej. Pierwszy dodany jest domyslny (ortofotomapa GUGiK).
+
+    Standardowy OpenStreetMap (tile.openstreetmap.org) nie jest uzyty: jego polityka wymaga
+    naglowka Referer, ktorego przegladarka nie wysyla dla pliku otwartego lokalnie (file://),
+    wiec kafelki byly blokowane. Dane OSM sa dostepne przez CARTO (bez tego wymogu)."""
+    import folium
+    wms = folium.raster_layers.WmsTileLayer
+    wms(url=f"{_GEOPORTAL}/PZGIK/ORTO/WMS/HighResolution", layers="Raster", name="Ortofotomapa GUGiK (HR)",
+        fmt="image/jpeg", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
+    wms(url=f"{_GEOPORTAL}/PZGIK/ORTO/WMS/StandardResolution", layers="Raster",
+        name="Ortofotomapa GUGiK (standard)", fmt="image/jpeg", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
+    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                     name="Esri World Imagery", attr="Esri, Maxar, Earthstar Geographics", max_zoom=23,
+                     max_native_zoom=19).add_to(m)
+    folium.TileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+                     name="OpenStreetMap (CARTO Voyager)", subdomains="abcd", max_zoom=23, max_native_zoom=20,
+                     attr="&copy; OpenStreetMap contributors &copy; CARTO").add_to(m)
+    folium.TileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+                     name="OpenStreetMap (CARTO jasna)", subdomains="abcd", max_zoom=23, max_native_zoom=20,
+                     attr="&copy; OpenStreetMap contributors &copy; CARTO").add_to(m)
+    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+                     name="Esri Topo", attr="Esri", max_zoom=23, max_native_zoom=19).add_to(m)
+    wms(url=f"{_GEOPORTAL}/img/guest/TOPO/MapServer/WMSServer", layers="Raster", name="Mapa topograficzna GUGiK",
+        fmt="image/png", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
+    wms(url=f"{_GEOPORTAL}/PZGIK/NMT/GRID1/WMS/ShadedRelief", layers="Raster", name="Cieniowanie NMT GUGiK",
+        fmt="image/png", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
+    # nakladki
+    wms(url=_KIEG, layers="budynki", name="Budynki EGiB", fmt="image/png", transparent=True, max_zoom=23,
+        overlay=True, attr="GUGiK KIEG").add_to(m)
+    wms(url=_KIEG, layers="dzialki,numery_dzialek", name="Dzialki EGiB", fmt="image/png", transparent=True,
+        max_zoom=23, overlay=True, show=False, attr="GUGiK KIEG").add_to(m)
+
+
 def make_map(rep: ReferenceReport, runner, path: Path) -> Path:
     import folium
     from pyproj import Transformer
@@ -400,13 +452,7 @@ def make_map(rep: ReferenceReport, runner, path: Path) -> Path:
     t = Transformer.from_crs(2180, 4326, always_xy=True)
     lat, lon = rep.spec["latlon"]
     m = folium.Map(location=[lat, lon], zoom_start=21, max_zoom=23, tiles=None)
-    folium.TileLayer("OpenStreetMap", max_zoom=23, max_native_zoom=19).add_to(m)
-    folium.raster_layers.WmsTileLayer(
-        url="https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMS/HighResolution", layers="Raster",
-        name="Ortofotomapa GUGiK", fmt="image/jpeg", max_zoom=23, overlay=False).add_to(m)
-    folium.raster_layers.WmsTileLayer(
-        url="https://integracja.gugik.gov.pl/cgi-bin/KrajowaIntegracjaEwidencjiGruntow", layers="budynki",
-        name="Budynki EGiB", fmt="image/png", transparent=True, max_zoom=23, overlay=True).add_to(m)
+    add_basemaps(m)
     ref = folium.FeatureGroup("GT i start", show=True)
     folium.CircleMarker([lat, lon], radius=7, color=GREEN, fill=True, fill_opacity=1,
                         tooltip="GT piłki (Google Maps)").add_to(ref)

@@ -10,7 +10,8 @@ description: >
   dem_alignment) x zrodlo piksela (detekcja yolo26l COCO, najlepszy detektor otwartego slownika
   "detection_best" = YOLOE-26l z promptem wizualnym, punkt reczny). Dla DSM ODM z_offset nie
   wplywa na polozenie poziome trafienia (porownanie wysokosci w ukladzie ODM), wiec wariant
-  DSM ODM x dem_alignment jest pominiety.
+  DSM ODM x dem_alignment jest pominiety. Warianty "7p": georeferencja rekonstrukcji wyrownana
+  transformacja przestrzennego podobienstwa do NMPT GUGiK (geodetect/align.py).
 base_config: ../config_pilka.yaml
 overrides:
   aggregate.eps_m: 3.0
@@ -20,6 +21,17 @@ axes:
   detect.source: [model, csv, manual]   # yolo26l COCO | najlepszy detektor (YOLOE wizualny) | recznie
 exclude:
   - {surface.source: odm_dsm, z_anchor.mode: dem_alignment}
+# Zadanie 3b: wyrownanie 7p do NMPT (georef.mode=similarity_nmpt), piksel reczny. z_anchor
+# start_point sluzy tylko jako start (tz); "bez baro" — wysokosci barometryczne kamer tylko jako
+# diagnostyka (prior wylaczony: model ODM tego lotu jest splaszczony w pionie, czego
+# podobienstwo nie opisze — patrz docs/eksperyment_pilka.md, sekcja "po wyrownaniu").
+variants:
+  - {name: "nmt_local | 7p | manual", set: {surface.source: nmt_local, georef.mode: similarity_nmpt, detect.source: manual}}
+  - {name: "nmpt_local | 7p | manual", set: {surface.source: nmpt_local, georef.mode: similarity_nmpt, detect.source: manual}}
+  - {name: "odm_dsm | 7p | manual", set: {surface.source: odm_dsm, georef.mode: similarity_nmpt, detect.source: manual}}
+  - {name: "nmt_local | 7p bez baro | manual", set: {surface.source: nmt_local, georef.mode: similarity_nmpt, georef.use_baro_prior: false, detect.source: manual}}
+  - {name: "nmpt_local | 7p bez baro | manual", set: {surface.source: nmpt_local, georef.mode: similarity_nmpt, georef.use_baro_prior: false, detect.source: manual}}
+  - {name: "odm_dsm | 7p bez baro | manual", set: {surface.source: odm_dsm, georef.mode: similarity_nmpt, georef.use_baro_prior: false, detect.source: manual}}
 reference: "nmpt_local | start_point | manual"
 metrics:
   static_classes: [sports ball]

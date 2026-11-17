@@ -40,6 +40,7 @@ class PipelineContext:
     detector: Detector
     surface: Optional[Surface] = None   # powierzchnia ray castingu; None = `dem`
     segmenter: Optional[Segmenter] = None   # SAM, tworzony leniwie (tylko metody mask_*)
+    alignment: Optional[object] = None      # align.GeorefAlignment (georef.mode=similarity_nmpt)
 
     @property
     def ray_surface(self) -> Surface:
@@ -107,6 +108,17 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
     z_cal = calibrate_z(config, dem, rec, base_frame)
     log.info("Kalibracja Z — %s", z_cal.describe())
+    config.georef.validate()
+    alignment = None
+    if config.georef.mode == "similarity_nmpt":
+        # Wyrownanie 7p do NMPT: z_anchor daje tylko start (tz). W ukladzie wyrownanym
+        # H [m npm] = h (tz zawiera z_offset), wiec ramka ma z_offset = 0.
+        from .align import align_reconstruction
+        alignment = align_reconstruction(config, rec, base_frame, z_cal, dem)
+        rec = alignment.reconstruction
+        z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
+        if config.surface.source == "odm_dsm":
+            surface = alignment.dsm_surface()
     cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
                      for n in rec.image_names])
     if surface is None:
@@ -118,8 +130,10 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     names = getattr(detector, "names", None)
     if names:   # nazwy klas z konfiguracji musza istniec w modelu
         validate_class_names(config.point.per_class, names.values(), "point.per_class")
-    return PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
-                           z_cal, detector, surface)
+    ctx = PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
+                          z_cal, detector, surface)
+    ctx.alignment = alignment
+    return ctx
 
 
 def run_single(config: PipelineConfig, image_name: str,

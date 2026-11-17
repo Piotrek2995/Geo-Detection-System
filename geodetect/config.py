@@ -222,6 +222,54 @@ class StartConfig:
     image_height_m: Optional[float] = None
 
 
+GEOREF_MODES = ("gps_only", "similarity_nmpt")
+
+
+@dataclass
+class GeorefConfig:
+    """Georeferencja rekonstrukcji ODM (geodetect/align.py).
+
+    gps_only        — georeferencja ODM z GPS drona + z_offset z z_anchor (dotychczasowa).
+    similarity_nmpt — transformacja 7p (przesuniecie, 3 obroty, skala) wyznaczona z dopasowania
+                      DSM ODM do NMPT GUGiK (odporna funkcja straty, odrzucanie zmian) z priorami:
+                      XY kamer z GPS EXIF i wysokosci barometryczne wzgledem startu (gdy
+                      z_anchor.start). z_anchor sluzy tylko jako start (tz); w ukladzie
+                      wyrownanym H = h, wiec z_offset = 0."""
+    mode: str = "gps_only"
+    residual: str = "vertical"          # vertical | normal (odleglosc punkt-powierzchnia)
+    loss: str = "tukey"                 # huber | tukey (etap koncowy; zgrubny zawsze Huber)
+    loss_k: float = 3.0                 # prog straty w jednostkach sigma_surface_m
+    sigma_surface_m: float = 0.15       # a priori blad punktu DSM wzgledem NMPT (dolna granica)
+    reject_coarse_m: float = 3.0        # odrzucanie zmian: etap zgrubny
+    reject_m: float = 1.0               # etap koncowy (|DSM - NMPT| > prog = zmiana / roslinnosc)
+    sample_step_m: float = 0.5          # probkowanie DSM ODM
+    smooth_dsm: bool = True             # srednia DSM w oknie oczka NMPT (porownanie 1 m z 1 m)
+    search_scales: list = field(default_factory=lambda: [0.8, 0.9, 1.0, 1.1, 1.2])
+    n_starts: int = 4                   # multi-start: start gps_only + n najlepszych kandydatow
+                                        # zgrubnych; wybor minimum kosztu MAP, reszta = raport
+                                        # niejednoznacznosci
+    estimate_sigma: bool = True         # sigma powierzchni z NMAD reszt (min. sigma_surface_m)
+    decorrelate: bool = True            # waga punktow DSM * (krok / oczko NMPT)^2
+    use_gps_prior: bool = True
+    sigma_gps_xy_m: float = 3.0
+    use_baro_prior: bool = True
+    sigma_baro_m: float = 0.5
+    search_xy_m: float = 8.0            # przeszukanie zgrubne: przesuniecie +- [m]
+    search_step_m: float = 1.0
+    search_rot_deg: float = 30.0        # obrot wokol pionu +- [deg]
+    search_rot_step_deg: float = 5.0
+    max_iter: int = 30
+    weak_ratio: float = 2.0             # parametr "slabo wyznaczony z powierzchni", gdy
+                                        # std(tylko powierzchnia) > weak_ratio * std(calosc)
+    dsm_resolution_m: float = 0.2       # siatka DSM ODM po wyrownaniu (surface odm_dsm)
+
+    def validate(self) -> None:
+        if self.mode not in GEOREF_MODES:
+            raise ValueError(f"Nieznane georef.mode={self.mode!r} (dozwolone: {GEOREF_MODES})")
+        if self.residual not in ("vertical", "normal") or self.loss not in ("huber", "tukey"):
+            raise ValueError("georef.residual: vertical|normal, georef.loss: huber|tukey")
+
+
 @dataclass
 class ZAnchorConfig:
     """Kalibracja wysokosci: H [m npm] = h_ODM + z_offset. Potensic zapisuje GPS Altitude
@@ -289,6 +337,7 @@ class PipelineConfig:
     filters: FilterConfig = field(default_factory=FilterConfig)
     aggregate: AggregateConfig = field(default_factory=AggregateConfig)
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
+    georef: GeorefConfig = field(default_factory=GeorefConfig)
     surface: SurfaceConfig = field(default_factory=SurfaceConfig)
     point: PointConfig = field(default_factory=PointConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
@@ -375,7 +424,7 @@ _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_pat
 _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
            "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig,
-           "start": StartConfig}
+           "start": StartConfig, "georef": GeorefConfig}
 
 
 def _build(cls, data: dict[str, Any]):

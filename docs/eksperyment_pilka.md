@@ -218,6 +218,155 @@ wykluczono z oceny. Próg conf wynosił 0,001, imgsz 1280.
 YOLO-World okazał się nieprzydatny. Najlepszy detektor wszedł do eksperymentu jako wariant
 `detection_best` (`detect.source: csv`).
 
+### 5.6 Po wyrównaniu rekonstrukcji do NMPT (transformacja 7-parametrowa)
+
+**Metoda** (`georef.mode: similarity_nmpt`, `geodetect/align.py`). Rekonstrukcję ODM wyrównano
+do NMPT GUGiK transformacją przestrzennego podobieństwa P' = s·R·(P − c0) + c0 + t. Parametry
+to tx, ty, tz, trzy obroty i skala. R = Rz·Ry·Rx, więc pochylenie zależy tylko od rx i ry.
+
+Obserwacje:
+- **DSM ODM vs NMPT.** Punkty DSM ODM wygładzono do oczka NMPT 1 m. Jako resztę przyjęto różnicę
+  pionową, z funkcją straty Hubera, a w etapie końcowym Tukeya. Punkty z |r| > 1 m odrzucono
+  jako zmiany (piłka, samochody, roślinność, krawędzie). σ powierzchni wyznaczono z danych (NMAD
+  reszt). Wagę zmniejszono czterokrotnie za korelację sąsiednich próbek (krok 0,5 m przy oczku 1 m).
+- **Priory.** XY kamer z GPS EXIF przyjęto z σ = 3 m. Wysokości barometryczne kamer względem
+  punktu startu, H = NMT(start) + alt_EXIF, przyjęto z σ = 0,5 m.
+
+Estymacja:
+1. Start z georeferencji gps_only + z_offset (start_point).
+2. Przeszukanie zgrubne (tx, ty, rz, skala) z karą priorów.
+3. Gauss-Newton z IRLS z kilku startów.
+4. Wybór minimum kosztu MAP.
+
+Kamery przeliczono ściśle: C' = G(C), R_wc' = R_wc·Rjᵀ, gdzie G = F⁻¹∘T∘F, F: ENU → (x, y EPSG:2180, h),
+a Rj to część obrotowa jakobianu G. W układzie wyrównanym wysokość H = h, a tz zawiera całe
+przejście h_ODM → H npm, dlatego `z_offset` nie jest potrzebny i wynosi 0. DSM ODM jest przeliczany
+do EPSG:2180 / npm. Rasteryzacja używa z-bufora (maksimum w komórce), bo przy dużym pochyleniu
+strome ściany przechodzą „za pion”. Interpolacja `griddata` mieszała wtedy dach z dolną warstwą
+i obniżała trafienia o 1,5–2 m.
+
+**Problem: model ODM tego lotu nie jest podobny do terenu.** Ogniskowa wyznaczona przez ODM
+w samokalibracji wynosi 0,374 (znormalizowana), a w locie „namiot” tą samą kamerą 0,528. Stosunek
+1,41 odpowiada odwrotności pionowej skali modelu 1/0,68 = 1,47 (§5.1). Rekonstrukcja jest więc
+spłaszczona w pionie przez błędną ogniskową. Taka deformacja jest anizotropowa: skala pozioma
+≈ 0,85, pionowa ≈ 1,47. Transformacja podobieństwa jej nie usunie i można ją dopasować tylko
+kompromisowo:
+- **z priorem barometrycznym** (`7p`): skala 1,35, obrót −19°, pochylenie 5,9°. Prior wymusza
+  rozciągnięcie w pionie, przez co poziomo model rośnie zamiast maleć. Reszty kamer względem
+  GPS mają RMS 3,9 m;
+- **bez priora barometrycznego** (`7p bez baro`, wysokości tylko diagnostycznie): skala 0,703,
+  obrót +15,7°, pochylenie 28,7°. Powierzchnia dachu jest dopasowana, a reszty kamer względem
+  GPS mają RMS 4,0 m. Wysokości kamer są jednak fizycznie błędne: H_kamer = 0,35·H_baro + b, RMS
+  6,9 m. Pochylenie 28,7° nie opisuje rzeczywistej orientacji, tylko kompensuje spłaszczenie.
+
+Reszty DSM − NMPT:
+
+| | przed (gps_only + start_point) | 7p | 7p bez baro |
+|---|---|---|---|
+| NMAD wszystkich punktów [m] | 3,03 | 2,79 | **1,18** |
+| punkty zgodne (\|r\| ≤ 1 m) | — | 420 / 1288 | 757 / 1288 |
+| NMAD punktów zgodnych [m] | — | 0,65 | 0,62 |
+| H dachu w GT po wyrównaniu (DSM ODM) − NMT [m], NMPT: 6,65 | 8,18 | 5,28 | **6,45** |
+
+Formalne σ parametrów są małe: 0,03–0,05 m dla przesunięć, 0,3–0,6° dla obrotów i 0,5 % dla skali.
+Nie obejmują one jednak błędu modelu. Multi-start znalazł minima różniące się kosztem o 1–5 jednostek,
+w tym jedno odległe o 6–15 m (inna skala i obrót). Pojedynczy dach dwuspadowy na obszarze ok.
+20 × 20 m słabo rozróżnia hipotezy. Pierwsza wersja z samym przeszukaniem zgrubnym trafiała
+w fałszywe dopasowanie 8 m od GPS, dlatego wprowadzono karę priorów i wybór minimum MAP.
+
+**Kontrola niezależna od wyrównania: punkty dachu z ortofotomap.** Cztery pary punktów dachu
+wskazane na ortofotomapach ODM i GUGiK (§3) nie biorą udziału w wyrównaniu. Odległość punktu ODM
+od GUGiK − lean wynosi:
+- przed wyrównaniem: 4,5 / 1,5 / 1,8 / 3,8 m;
+- po `7p bez baro`: 1,6 / 0,7 / 1,2 / 1,2 m.
+
+Wyniki (piksele ręczne, pozycja zagregowana):
+
+| powierzchnia | georeferencja | RMS wielowidokowy [m] | błąd vs GT_transfer [m] | błąd vs GT Google [m] |
+|---|---|---|---|---|
+| NMPT | gps_only, start_point | 0,44 | 3,44 | 1,94 |
+| NMPT | gps_only, dem_alignment | 1,41 | 2,00 | 2,70 |
+| NMPT | 7p | 0,71 | 3,07 | 2,59 |
+| NMPT | **7p bez baro** | **0,25** | **1,11** | 3,74 |
+| DSM ODM | gps_only, start_point | 0,67 | 2,87 | 2,07 |
+| DSM ODM | 7p | 0,91 | 2,93 | 2,75 |
+| DSM ODM | **7p bez baro** | 0,71 | **0,81** | 4,94 |
+| NMT | gps_only, dem_alignment | 0,79 | 3,93 | 1,97 |
+| NMT | 7p bez baro | 1,75 | 4,14 | 0,70 |
+
+**Hipotezy po wyrównaniu.**
+- H1: NMT nadal daje największy błąd względem GT_transfer (4,1–4,5 m), bo promień przechodzi
+  przez dach.
+- H2: dla NMPT po wyrównaniu nadal brak trendu z kątem padania (`7p bez baro`: nachylenie
+  +0,01 m, r = 0,02), a rozrzut wielowidokowy spadł do 0,25 m.
+- Błąd bezwzględny względem GT_transfer spadł z 2–3,5 m do 0,8–1,1 m. Potwierdza to dekompozycję
+  z §5.4: dominującym składnikiem był błąd georeferencji rekonstrukcji.
+
+**Ważność GT_transfer po wyrównaniu.** GT_transfer korzysta tylko z położenia piłki
+**względem punktów dachu** na ortofotomapie ODM. Skalę, obrót i przesunięcie tej ortofotomapy
+pochłania Helmert 2D wyznaczany z tych samych punktów. Wyrównanie 7p nie zmienia ortofotomapy
+ODM, więc GT_transfer pozostaje ważny i jest tym samym punktem dla obu georeferencji. Zastrzeżenie:
+ortofotomapa ODM powstała na zdeformowanym DSM ODM. Piłka i punkty dachu leżą jednak na tej samej
+połaci, więc deformacja wysokości przenosi się na nie podobnie.
+
+**Zależności danych.**
+- Wyrównanie używa NMPT GUGiK. Ray casting w wariantach NMPT używa tego samego NMPT.
+- GT_transfer używa ortofotomapy GUGiK i obrysu EGiB (lean) z tej samej kampanii 2025. NMPT
+  i ortofotomapa pochodzą z tego samego nalotu i aerotriangulacji, więc mają wspólną
+  georeferencję.
+- Błąd względem GT_transfer **nie wykryje** wspólnego przesunięcia całej kampanii GUGiK. Jest
+  ono jednak małe: deklarowany błąd położenia wynosi 0,1–0,2 m.
+- Porównanie 7p vs GT_transfer jest więc niezależne co do obserwacji (GT_transfer nie wchodzi do
+  wyrównania), ale nie co do układu odniesienia.
+
+Niezależne od GUGiK są:
+- GT Google (słabe, niezgodne z GT_transfer o 4,7 m). Pogorszenie względem niego po wyrównaniu
+  wynika z tej niezgodności;
+- reszty priorów GPS (RMS ≈ 4 m, w granicach dokładności GPS drona przy skwantowanym EXIF);
+- rozrzut wielowidokowy (miara spójności, nie dokładności).
+
+Kontrola punktami dachu jest niezależna od wyrównania, ale również odnosi się do ortofotomapy
+GUGiK.
+
+**Drugi lot („namiot”, `experiments/georef.yaml`, bez punktu startu, więc bez priora baro).**
+Teren jest otwarty, a obszar większy (ok. 70 × 60 m). Wyrównanie jest dobrze uwarunkowane:
+- żaden parametr nie jest słabo wyznaczony, a liczba uwarunkowania wynosi 4,4·10³;
+- alternatywne minima są gorsze o > 385 jednostek kosztu;
+- parametry: skala 0,950, **pochylenie 2,73°** (dem_alignment: płaszczyzna 2,31°), obrót −0,4°,
+  przesunięcie poziome (0,3; −2,1) m;
+- reszty DSM − NMPT: NMAD 3,60 → 0,51 m, z czego 40 tys. z 79 tys. punktów zgodnych;
+- reszty priora GPS: RMS 4,1 m.
+
+| wariant | RMS głównego namiotu [m] | przesunięcie vs gps_only + dem_alignment (NMT) [m] |
+|---|---|---|
+| gps_only + dem_alignment, NMT | 0,38 | — |
+| gps_only + dem_alignment + pochylenie płaszczyzny, NMT | 1,03 | 1,00 |
+| gps_only, DSM ODM | 0,47 | 1,14 |
+| 7p, NMT | 1,04 | 1,51 |
+| 7p, NMPT | 1,02 | 1,50 |
+| 7p, DSM ODM | 0,46 | 1,85 |
+
+Na NMT i NMPT rozrzut wielowidokowy namiotu po wyrównaniu rośnie z 0,38 do 1,0 m, tak samo jak
+przy korekcie pochylenia płaszczyzną w `dem_alignment`. Zależność błędu od tan(kąta padania) ma
+nachylenie +1,2 m. Pochylenie ~2,5° wyznaczone z całego obszaru nie jest więc zgodne z geometrią
+promieni w miejscu namiotu. Prawdopodobnie model ODM jest zdeformowany nieliniowo (typowe
+„wygięcie” przy georeferencji z samego GPS), a nie sztywno pochylony. Na DSM ODM rozrzut się nie
+zmienia (0,47 → 0,46 m = ·s), bo ray casting na własny model jest niezmienniczy względem
+podobieństwa. Dla tego lotu brak niezależnego GT, więc przesunięcia 1,5–1,9 m nie można
+rozstrzygnąć co do dokładności.
+
+**Wniosek z wyrównania.**
+- Wyrównanie 7p do NMPT usuwa dominujący błąd georeferencji, gdy rekonstrukcja jest
+  w przybliżeniu podobna do terenu. W locie „piłka” warunek ten spełnia składowa pozioma, a błąd
+  spada do ~1 m.
+- Nie naprawi jednak deformacji samej rekonstrukcji (błędna ogniskowa, wygięcie). W locie „piłka”
+  prior barometryczny ujawnia tę niezgodność: k = 0,35, RMS 6,9 m. Diagnostyka `baro_scale_k` jest
+  w raporcie.
+- Właściwa poprawa: stała kalibracja kamery z lotu o dobrej geometrii (ODM `--cameras`, ogniskowa
+  0,528), potem ponowna rekonstrukcja i wyrównanie 7p z priorem barometrycznym.
+- Opcjonalnej obserwacji 2D (dopasowanie ortofotomap ODM ↔ GUGiK) nie wdrożono: automatyczne
+  dopasowanie SIFT zawiodło (§3). Pary wskazane ręcznie posłużyły jako kontrola.
+
 ## 6. Wnioski
 
 1. Wybór powierzchni ray castingu decyduje o poprawności lokalizacji obiektów na dachach:
@@ -230,6 +379,9 @@ YOLO-World okazał się nieprzydatny. Najlepszy detektor wszedł do eksperymentu
    Przy niskim, krótkim locie (baza ok. 10 m) model ma błąd skali (0,68 w pionie, 0,85 w poziomie),
    obrotu (19°) i pochylenia (14°). Ani `start_point`, ani `dem_alignment` nie korygują
    tych błędów, bo wyznaczają tylko stałą wysokości.
+   Wyrównanie 7p do NMPT (§5.6) zmniejsza błąd względem GT_transfer do 0,8–1,1 m (NMPT/DSM).
+   Wymaga jednak wyłączenia priora barometrycznego, bo rekonstrukcja jest spłaszczona w pionie
+   przez błędną samokalibrację ogniskowej (0,374 vs 0,528 w locie „namiot”).
 3. Kalibracja `start_point` z medianą jest poprawna tylko przy prawidłowej skali rekonstrukcji.
    Diagnostyka regresyjna (k = 0,68) wykrywa ten przypadek, a jej wynik zgadza się
    z `dem_alignment` z dokładnością do 0,9 m.

@@ -195,6 +195,39 @@ jako niezależna kontrola, a nie do kalibracji wyników, bo ten sam rozrzut jest
 miarą jakości. Optimum jest zaniżone o wysokość punktu reprezentatywnego nad gruntem
 (środek bboxa).
 
+### Georeferencja rekonstrukcji (`georef`): wyrównanie 7p do NMPT
+
+`z_anchor` poprawia tylko stałą wysokości (ewentualnie płaszczyznę). Gdy ODM georeferuje model
+wyłącznie z GPS drona, błędne mogą być też skala, obrót i pochylenie. `georef.mode`:
+
+| tryb | opis |
+|---|---|
+| `gps_only` (domyślny) | georeferencja ODM + `z_offset` z `z_anchor` |
+| `similarity_nmpt` | transformacja 7p (tx, ty, tz, rx, ry, rz, skala) z dopasowania DSM ODM do NMPT GUGiK (`surface.nmpt_dir`) |
+
+W trybie `similarity_nmpt` obserwacje są dwie. Pierwsza to odległość punktów DSM ODM do NMPT, pionowa
+albo wzdłuż normalnej (`residual`). DSM jest wygładzony do oczka NMPT, a zmiany o |r| > `reject_m`
+są odrzucane (samochody, roślinność, nowe obiekty). Na drugim etapie działa funkcja straty
+Tukeya. Druga obserwacja to priory: XY kamer z GPS EXIF (`sigma_gps_xy_m`, domyślnie 3 m) oraz,
+gdy jest `z_anchor.start`, wysokości barometryczne kamer (`sigma_baro_m`, `use_baro_prior`).
+
+Estymacja przebiega tak:
+1. Przeszukanie zgrubne (tx, ty, rz, skala) z karą priorów, startując z `gps_only` + `z_offset`.
+2. Multi-start Gaussa-Newtona z IRLS i estymacją σ powierzchni.
+3. Wybór minimum kosztu MAP.
+
+Raport (`summary.md` eksperymentu, `variants/*/alignment.json`) zawiera:
+- parametry z σ, liczonymi z całości oraz z samej powierzchni;
+- parametry słabo wyznaczone przez powierzchnię (na płaskim terenie tx, ty i rz wiąże tylko GPS);
+- reszty przed i po wyrównaniu oraz reszty priorów;
+- `baro_scale_k`, czyli zgodność skali pionowej z barometrem;
+- alternatywne minima.
+
+Kamery są przeliczane ściśle: C' = G(C), R_wc' = R_wc·Rjᵀ, gdzie Rj to część obrotowa jakobianu G.
+W układzie wyrównanym H = h, więc `z_offset` = 0 (zawiera go tz). DSM ODM jest przeliczany do
+EPSG:2180 / m n.p.m. Eksperymenty: `experiments/georef.yaml` (lot „namiot”) i warianty `7p`
+w `experiments/pilka.yaml`.
+
 ### Eksperyment walidacyjny „piłka na dachu”
 
 Osobny lot i osobny config (`config_pilka.yaml`, `experiments/pilka.yaml`); opis i wyniki
@@ -343,7 +376,8 @@ geodetect/
   dem.py        DemSampler: GugikDem (REST GetHByXY), RasterDem (GeoTIFF), resolve_dem
   geo.py        EnuFrame: lokalne ENU (ODM) -> WGS84 -> EPSG:2180 (ściśle)
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
-  zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment
+  zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment / start_point
+  align.py      georef similarity_nmpt: wyrównanie 7p rekonstrukcji ODM do NMPT (kamery, DSM)
   detect.py     Detector (YOLO: klasy po nazwie, progi, kafle), list_models / model_info
   tiling.py     siatka kafli, scalanie detekcji z kafli (ucięte boxy, NMS)
   gt_labels.py  etykiety YOLO z eksportu Roboflow jako ground truth (letterbox, obrót)

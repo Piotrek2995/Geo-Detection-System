@@ -1,0 +1,28 @@
+# Zadanie 3b: wyrownanie rekonstrukcji ODM do NMPT GUGiK (7 parametrow) na locie "namiot".
+# Uruchomienie: python scripts/run_experiment.py experiments/georef.yaml
+name: georef
+description: >
+  Lot "namiot" (26 zdjec). Porownanie dotychczasowej georeferencji (GPS drona w ODM + z_offset
+  z dem_alignment, z pochyleniem plaszczyzny i bez) z wyrownaniem 7p do NMPT (georef.mode =
+  similarity_nmpt: przesuniecie, 3 obroty, skala; obserwacje DSM ODM vs NMPT + prior GPS kamer).
+  Punktu startu brak, wiec bez priora barometrycznego. Te same detekcje we wszystkich wariantach.
+base_config: ../config.yaml
+overrides:
+  model: models/LudzieiNamioty.pt
+  detect.tiling.enabled: false
+  detect.conf_per_class: {}
+  z_anchor.mode: dem_alignment
+  point.method: bbox_center
+  point.per_class: {}
+  aggregate.eps_m: 10.0
+variants:
+  - {name: "gps_only | dem_alignment | NMT", set: {surface.source: nmt_gugik_rest}}
+  - {name: "gps_only | dem_alignment+tilt | NMT", set: {surface.source: nmt_gugik_rest, z_anchor.apply_tilt: true}}
+  - {name: "gps_only | dem_alignment | NMPT", set: {surface.source: nmpt_local}}
+  - {name: "gps_only | DSM ODM", set: {surface.source: odm_dsm}}
+  - {name: "7p | NMT", set: {surface.source: nmt_gugik_rest, georef.mode: similarity_nmpt}}
+  - {name: "7p | NMPT", set: {surface.source: nmpt_local, georef.mode: similarity_nmpt}}
+  - {name: "7p | DSM ODM", set: {surface.source: odm_dsm, georef.mode: similarity_nmpt}}
+reference: "gps_only | dem_alignment | NMT"
+metrics:
+  min_views_scan: 3
