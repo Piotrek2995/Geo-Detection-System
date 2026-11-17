@@ -72,6 +72,18 @@ filters:
   border_margin_px: 2.0
   exclude_border: false
 
+# Rozmiar fizyczny obiektow (geodetect/size.py): bbox rzutowany na pozioma plaszczyzne na
+# wysokosci trafienia (bbox_px * R / f z korekta kata padania), mediana po widokach.
+# Poza zakresem [min, max] m -> flaga size_out_of_range w eksporcie i na mapie (obiekt zostaje).
+size:
+  enabled: true
+  ranges_m:                   # wiekszy wymiar poziomy [m]; klasa bez wpisu = bez filtra
+    namiot: [1.5, 6.0]
+    people: [0.3, 2.5]
+    sports ball: [0.1, 0.5]
+  min_cos_incidence: 0.3      # promien bardziej ukosny -> rozmiar bez korekty kata
+  exclude_border: true        # detekcje uciete krawedzia kadru pomijane w medianie (jesli sa inne)
+
 aggregate:
   eps_m: 3.0
   min_samples: 1

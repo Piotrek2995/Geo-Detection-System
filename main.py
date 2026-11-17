@@ -1,4 +1,4 @@
-"""Geo-Detection-System — CLI.
+"""Geo-Detection-System — CLI (ta sama funkcja run_pipeline co GUI).
 
 Przyklady:
     python main.py                               # zdjecia z config.yaml (images)
@@ -6,22 +6,23 @@ Przyklady:
     python main.py --config config.yaml
     python main.py --image SING0304.JPG --image SING0316.JPG
     python main.py --all --surface nmpt_local --eps 10
+    python main.py --all --out output/moj_przebieg
 
-Wyniki w <output_dir>: detections.geojson, objects.geojson, objects.csv,
-detections_map.html, spread.png.
+Wyniki w <output_dir>/runs/<data_czas>/ (albo --out): run_report.html (raport dla odbiorcy),
+run_report.json, map.html, results.gpkg (warstwy objects/detections/cameras/rays),
+objects.geojson, detections.geojson, objects.csv, detections.csv, objects.kml, thumbs/, spread.png.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
-from geodetect.batch import run_batch, summary_text
+from geodetect.batch import summary_text
 from geodetect.config import SURFACE_SOURCES, PipelineConfig
-from geodetect.dem import GugikDem
-from geodetect.export import export_all
-from geodetect.pipeline import build_context
+from geodetect.run import Progress, run_pipeline
 
 DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
 
@@ -39,6 +40,8 @@ def parse_args() -> argparse.Namespace:
                    help="powierzchnia ray castingu; nadpisuje surface.source z configu")
     p.add_argument("--eps", type=float, default=None,
                    help="promien DBSCAN [m]; nadpisuje aggregate.eps_m z configu")
+    p.add_argument("--out", type=Path, default=None,
+                   help="katalog wynikow przebiegu (domyslnie <output_dir>/runs/<data_czas>)")
     p.add_argument("-v", "--verbose", action="store_true", help="logi DEBUG")
     return p.parse_args()
 
@@ -51,11 +54,14 @@ def load_config(path: Path | None) -> PipelineConfig:
     return PipelineConfig.from_dict({}, base_dir=Path(__file__).parent)
 
 
-def print_progress(i: int, n: int, name: str) -> None:
-    print(f"[{i}/{n}] {name}", flush=True)
+def print_progress(p: Progress) -> None:
+    if p.stage == "images":
+        print(f"[{p.i}/{p.n}] {p.message}", flush=True)
+    elif p.i == 0 or p.stage == "done":
+        print(f"== {p.message}", flush=True)
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -68,18 +74,17 @@ def main() -> None:
     if args.eps is not None:
         cfg.aggregate.eps_m = args.eps
 
-    ctx = build_context(cfg)
-    batch = run_batch(cfg, ctx, images=None if args.all else cfg.images,
-                      progress_cb=print_progress)
-    paths = export_all(batch, cfg.output_dir)
-
-    print("\n" + summary_text(batch))
-    print("\nPliki wynikowe:")
-    for p in paths.values():
-        print(f"  {p}")
-    if isinstance(ctx.dem, GugikDem):
-        logging.info("NMT cache: hits=%d, http_requests=%d", ctx.dem.hits, ctx.dem.misses)
+    res = run_pipeline(cfg, progress_cb=print_progress, all_images=args.all, out_dir=args.out,
+                       raise_errors=True)
+    if res.cancelled:
+        print("Przerwano.")
+        return 1
+    print("\n" + summary_text(res.batch))
+    print(f"\nWyniki ({res.duration_s:.0f} s): {res.out_dir}")
+    for k, p in res.export.items():
+        print(f"  {k:20s} {p}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

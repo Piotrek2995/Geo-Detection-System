@@ -19,6 +19,11 @@ log = logging.getLogger(__name__)
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 
 ProgressCallback = Callable[[int, int, str], None]  # (i, n, image_name), i od 1
+CancelCheck = Callable[[], bool]                    # True = przerwac przetwarzanie
+
+
+class Cancelled(Exception):
+    """Przetwarzanie przerwane na zadanie (flaga cancel)."""
 
 
 @dataclass
@@ -83,11 +88,12 @@ def summary_text(batch: BatchResult) -> str:
     lines.append("Obiekty (confirmed / wszystkie): " + ", ".join(
         f"{c}={conf_cls[c]}/{n}" for c, n in sorted(per_cls.items())))
     lines.append(f"  {'id':>3} {'klasa':8} {'status':11} {'widoki':>6} {'RMS[m]':>7} {'max[m]':>7} "
-                 f"{'inc[deg]':>8} {'range[m]':>8} {'conf':>5}  zdjecia")
+                 f"{'inc[deg]':>8} {'range[m]':>8} {'conf':>5} {'rozm[m]':>7}  zdjecia / flagi")
     for o in batch.objects:
         lines.append(f"  {o.object_id:>3} {o.cls_name:8} {o.status:11} {o.n_views:>6} {o.rms_m:>7.2f} "
                      f"{o.max_m:>7.2f} {o.mean_incidence_deg:>8.1f} {o.mean_range_m:>8.1f} "
-                     f"{o.mean_conf:>5.2f}  {','.join(i.removesuffix('.JPG') for i in o.images)}")
+                     f"{o.mean_conf:>5.2f} {o.size_m:>7.2f}  {','.join(i.removesuffix('.JPG') for i in o.images)}"
+                     + (f"  [{', '.join(o.flags)}]" if o.flags else ""))
     if batch.suspicious_objects:
         lines.append("UWAGA — mozliwe zle scalenie (to samo zdjecie >1 raz w klastrze):")
         for o in batch.suspicious_objects:
@@ -97,7 +103,8 @@ def summary_text(batch: BatchResult) -> str:
 
 def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
               images: Optional[list[str]] = None,
-              progress_cb: Optional[ProgressCallback] = None) -> BatchResult:
+              progress_cb: Optional[ProgressCallback] = None,
+              cancel: Optional[CancelCheck] = None) -> BatchResult:
     """images=None: wszystkie zdjecia z rekonstrukcji ODM. Zdjecia z folderu (lub z listy),
     ktorych nie ma w rekonstrukcji albo na dysku, sa pomijane i raportowane w `skipped`."""
     if ctx is None:
@@ -136,6 +143,9 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
 
     results: list[ImageResult] = []
     for i, name in enumerate(todo, start=1):
+        if cancel is not None and cancel():
+            log.warning("Przerwano po %d z %d zdjec", i - 1, len(todo))
+            raise Cancelled(f"przerwano po {i - 1} z {len(todo)} zdjec")
         if progress_cb is not None:
             progress_cb(i, len(todo), name)
         try:
@@ -147,7 +157,7 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
     save_dem_cache(ctx.dem)
     batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration, config=cfg,
                         qc=_qc_report(ctx))
-    batch.objects = aggregate(batch.detections, cfg.aggregate)
+    batch.objects = aggregate(batch.detections, cfg.aggregate, cfg.size)
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),
              len(batch.objects))

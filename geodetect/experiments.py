@@ -560,7 +560,7 @@ class ExperimentRunner:
                                 step_m=float(d.get("step_m", 0.25)), eps_m=src.cfg.aggregate.eps_m,
                                 cls_name=self.exp.metrics.static_classes[0],
                                 min_views=self.exp.metrics.min_views_scan)
-        src.batch.objects = aggregate(src.batch.detections, src.cfg.aggregate)
+        src.batch.objects = aggregate(src.batch.detections, src.cfg.aggregate, src.cfg.size)
         if not scan.valid:
             raise ValueError(f"Wariant {v.name}: multiview_check bez obiektow statycznych z >= "
                              f"{self.exp.metrics.min_views_scan} widokami w wariancie {d['from']}")
@@ -582,7 +582,7 @@ class ExperimentRunner:
                                        eps_m=vr.cfg.aggregate.eps_m, cls_name=spec.static_classes[0],
                                        min_views=spec.min_views_scan,
                                        max_rays_per_detection=int(mv.get("max_rays", 30)))
-            b.objects = aggregate(b.detections, vr.cfg.aggregate)   # skan nadpisuje object_id
+            b.objects = aggregate(b.detections, vr.cfg.aggregate, vr.cfg.size)   # skan nadpisuje object_id
             vr.statics = [object_metrics(b, o) for o in static_objects_of(b, spec, spec.min_views_static)]
             vr.main = vr.statics[0] if vr.statics else None
         if spec.ground_truth and vr.cfg.eval.labels_dir is not None:

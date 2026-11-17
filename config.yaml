@@ -112,6 +112,18 @@ filters:
   max_range_m: null           # np. 150
   max_incidence_deg: null     # np. 65 (kat promienia od pionu)
 
+# Rozmiar fizyczny obiektow (geodetect/size.py): bbox rzutowany na pozioma plaszczyzne na
+# wysokosci trafienia (bbox_px * R / f z korekta kata padania), mediana po widokach.
+# Poza zakresem [min, max] m -> flaga size_out_of_range w eksporcie i na mapie (obiekt zostaje).
+size:
+  enabled: true
+  ranges_m:                   # wiekszy wymiar poziomy [m]; klasa bez wpisu = bez filtra
+    namiot: [1.5, 6.0]
+    people: [0.3, 2.5]
+    sports ball: [0.1, 0.5]
+  min_cos_incidence: 0.3      # promien bardziej ukosny -> rozmiar bez korekty kata
+  exclude_border: true        # detekcje uciete krawedzia kadru pomijane w medianie (jesli sa inne)
+
 # Agregacja wielowidokowa (DBSCAN w EPSG:2180, osobno dla kazdej klasy)
 aggregate:
   # Uwaga: przy min_samples=1 rozrzut w klastrze jest ograniczony przez eps (laczenie
@@ -178,7 +190,11 @@ qc:
   vertical_scale_bad: 0.20
   camera_focal: null            # znana kalibracja f/max(w,h); null = porownanie z EXIF f35
                                 # (EXIF Potensic Atom LT nie uwzglednia kadrowania -> tylko ostrzezenie)
-  surface_nmad_warn_m: 0.5      # NMAD(DSM ODM - NMPT)
+  # zgodnosc z NMPT liczona dla AKTYWNEJ georeferencji (z_anchor / 7p), obok wartosci gps_only
+  surface_nmad_warn_m: 0.75     # NMAD(DSM ODM - NMPT) po usunieciu plaszczyzny (ksztalt)
   surface_nmad_bad_m: 1.5
+  tilt_warn_deg: 2.0            # pochylenie plaszczyzny reszt (przechyl modelu)
+  tilt_bad_deg: 6.0
+  core_radius_m: 30.0           # tylko DSM <= tyle od kamer (krance DSM ODM ekstrapolowane)
   rotation_warn_deg: 2.0        # sqrt(2) * sigma_GPS / rozpietosc kamer
   rotation_bad_deg: 5.0

@@ -449,6 +449,79 @@ Model fixcal jest nadal poziomo rozciągnięty względem pionu, mniej więcej o 
 
 QC poprawnie rozróżnia przypadek „najpierw kalibracja” (stara) od „wystarczy 7p” (fixcal, namiot).
 
+**Aktualizacja (zadanie 8).** Wiersz NMAD powyżej to surowe reszty na całym DSM w georeferencji
+`gps_only`. Tak liczone oznaczały jako ZŁY także dobry lot „namiot” (3,61 m), choć w promieniu 30 m
+od kamer i po usunięciu pochylenia reszty mają NMAD 0,32 m: wartość zawyżały przechył modelu
+(3,9°) i ekstrapolowane krańce DSM. Kontrola liczy teraz reszty dla aktywnej georeferencji
+(przed → po), w strefie ≤ 30 m od kamer, z rozdzieleniem na pochylenie (`tilt`) i kształt
+(`surface`, NMAD po usunięciu płaszczyzny):
+
+| | namiot | piłka — stara | piłka — fixcal |
+|---|---|---|---|
+| gps_only + dem_alignment: pochylenie / NMAD kształtu | 3,89° (OSTRZ.) / 0,32 m (OK) | 14,7° (ZŁY) / 2,77 m (ZŁY) | 9,05° (ZŁY) / 3,37 m (ZŁY) |
+| dem_alignment + apply_tilt | 1,59° (OK) / 0,32 m (OK) | — | — |
+| 7p: pochylenie / NMAD kształtu (przed → po) | 3,89 → 1,19° (OK) / 0,32 → 0,29 m (OK) | 14,7 → 2,3° (OSTRZ.) / 2,77 → 2,82 m (ZŁY) | 9,05 → 0,43° (OK) / 3,37 → 1,88 m (ZŁY) |
+| status (gps_only / 7p) | OSTRZEŻENIE / OSTRZEŻENIE | ZŁY / ZŁY | ZŁY / ZŁY |
+
+Dobry lot daje OSTRZEŻENIE (pochylenie przy `gps_only`, EXIF, baza 3,2°), a nie ZŁY. Lot „piłka”
+pozostaje ZŁY także po 7p. Przyczyną jest kształt modelu niezgodny z NMPT (NMAD 1,9 m dla fixcal)
+przy bazie 12 m. Przy aktywnym 7p QC nie zaleca już 7p, a ocena bazy jest ograniczona do
+ostrzeżenia, bo orientacja pochodzi z wyrównania i jest sprawdzana przez `tilt`.
+
+### 5.8 Przesunięcie dachu zależne od wysokości (poprawka GT_transfer)
+
+Ortofotomapa GUGiK jest rektyfikowana na NMT, więc punkt na wysokości H nad gruntem jest na niej
+przesunięty o **d = v · H**. Wektor v (na 1 m wysokości) jest lokalnie stały i skierowany od rzutu
+środka rzutów zdjęcia lotniczego. Dotychczasowa korekta odejmowała jeden wektor lean
+(+0,60; −1,25) m od każdego punktu, niezależnie od jego wysokości. Lean wyznaczono dopasowaniem
+obrysu EGiB do dachu i dotyczy on głównie krawędzi dachu.
+
+Metoda (`geodetect/lean.py`, `scripts/pilka_reference.py`, `validation.gt_transfer`):
+1. Wysokość krawędzi H_kraw to mediana (NMPT − NMT) w pasie 0,5–1,5 m wewnątrz obrysu EGiB
+   budynku z GT: **5,80 m** (20 952 px). Pas zaczyna się 0,5 m do wewnątrz, bo NMPT 1 m na samej
+   krawędzi miesza dach z gruntem.
+2. Wektor v = lean / H_kraw = **(+0,103; −0,215) m/m**.
+3. Każdy punkt dachu z ortofotomapy GUGiK jest korygowany własną wysokością:
+   p = p_orto − v · H(p), gdzie H = NMPT − NMT w położeniu prawdziwym (iteracja).
+4. Helmert ODM → położenia prawdziwe (nie: Helmert do ortofotomapy, a potem stały lean). Piłka
+   nie dostaje dodatkowej korekty, bo ortofotomapa ODM jest rektyfikowana na własnym DSM.
+
+Punkty dachu leżą na wysokości 2,7–3,4 m (okapy), czyli niżej niż H_kraw. Ich korekty wynoszą
+0,65–0,81 m zamiast 1,39 m. Helmert: skala 0,8475, obrót 18,97°, RMS 0,11 m (wcześniej 0,12).
+**GT_transfer przesuwa się o (+0,27; −0,59) m = 0,65 m**, do X 660241,38, Y 664884,61. Wysokość
+NMPT − NMT w tym punkcie wynosi 3,95 m (wcześniej 3,32 m).
+
+Błąd względem GT_transfer (warianty z §5.7; ręcznie wskazane punkty, eps 3 m):
+
+| wariant | stały lean (3c) | lean zależny od wysokości | punkty dachu RMS (max), wcześniej → teraz |
+|---|---|---|---|
+| stara · NMPT · start_point | 3,44 | 2,97 | 3,18 (4,54) → 3,01 (4,23) |
+| stara · NMPT · dem_alignment | 2,00 | 1,41 | 3,18 (4,54) → 3,01 (4,23) |
+| stara · NMPT · 7p | 3,07 | 2,44 | 4,10 (5,41) → 4,01 (4,94) |
+| stara · NMPT · 7p bez baro | 1,11 | **0,48** | 0,98 (1,31) → 0,88 (1,16) |
+| stara · DSM · 7p bez baro | 0,81 | 0,99 | 0,98 (1,31) → 0,88 (1,16) |
+| fixcal · NMPT · start_point | 3,90 | 3,40 | 5,02 (6,16) → 4,61 (5,84) |
+| fixcal · NMPT · dem_alignment | 3,30 | 2,76 | 5,02 (6,16) → 4,61 (5,84) |
+| **fixcal · NMPT · 7p** | 1,52 | **0,95** | 1,92 (2,45) → **1,65 (2,22)** |
+| **fixcal · DSM · 7p** | 1,51 | **0,94** | 1,92 (2,45) → 1,65 (2,22) |
+| fixcal · NMPT · 7p bez baro | 1,95 | 1,47 | 1,72 (1,94) → 1,21 (1,48) |
+| fixcal · NMT · start_point (H1) | 6,83 | 6,38 | — |
+
+Wynik pracy (fixcal + 7p z barometrem) ma względem GT_transfer **0,95 m zamiast 1,52 m**. Punkty
+dachu również lepiej zgadzają się z GUGiK (RMS 1,65 vs 1,92 m), więc poprawka jest spójna z
+niezależną kontrolą.
+
+**Rozbieżność „okap 3,3 m vs H1 ~6,7 m” zmalała tylko częściowo.** GT_transfer przesunął się
+o 0,65 m w głąb połaci. Wysokość w tym punkcie wynosi 3,95 m (bilinearnie, NMPT 1 m), a maksimum
+NMPT w promieniu 0,75 m to 5,2 m: punkt leży na zboczu połaci, 1,5–2 m od okapu. Do ~6,7 m
+wynikających z trendu H1 nadal brakuje 1,5–2,7 m. Pozostałe możliwe przyczyny:
+- NMPT 1 m wygładza połać przy okapie;
+- piłka mogła leżeć wyżej, niż wskazano na ortofotomapie ODM (rozdzielczość 1 m/px przy wskazaniu);
+- trend H1 (6,72 · tan inc) obejmuje też błąd georeferencji rekonstrukcji, a nie tylko wysokość
+  dachu.
+
+Dokładność GT_transfer pozostaje rzędu 0,5–1 m. Rozstrzygnięcie nadal wymaga pomiaru RTK.
+
 ## 6. Wnioski
 
 1. Wybór powierzchni ray castingu decyduje o poprawności lokalizacji obiektów na dachach:
@@ -465,8 +538,8 @@ QC poprawnie rozróżnia przypadek „najpierw kalibracja” (stara) od „wysta
    Wymaga jednak wyłączenia priora barometrycznego, bo rekonstrukcja jest spłaszczona w pionie
    przez błędną samokalibrację ogniskowej (0,374 vs 0,528 w locie „namiot”). Jest to kompensacja.
    Po ustaleniu kalibracji (§5.7) 7p z priorem barometrycznym daje wynik fizycznie spójny:
-   skala 0,95, pochylenie 4,6°, dach 6,67 m. Błąd wynosi 1,5 m względem GT_transfer i jest to
-   korekta. Pozostała anizotropia ~1,2–1,4 wskazuje, że do pełnej korekty potrzebna jest
+   skala 0,95, pochylenie 4,6°, dach 6,67 m. Błąd wynosi 0,95 m względem GT_transfer
+   z korektą lean zależną od wysokości (§5.8; ze stałym lean 1,5 m) i jest to korekta. Pozostała anizotropia ~1,2–1,4 wskazuje, że do pełnej korekty potrzebna jest
    kalibracja kamery niezależna od lotu.
 3. Kalibracja `start_point` z medianą jest poprawna tylko przy prawidłowej skali rekonstrukcji.
    Diagnostyka regresyjna (k = 0,68) wykrywa ten przypadek, a jej wynik zgadza się

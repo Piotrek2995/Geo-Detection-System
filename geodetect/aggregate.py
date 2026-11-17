@@ -13,7 +13,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from pyproj import Transformer
 
-from .config import AggregateConfig
+from typing import Optional
+
+from .config import AggregateConfig, SizeConfig
 from .pipeline import GeoDetection
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,9 @@ class AggregatedObject:
     mean_range_m: float
     duplicate_images: list[str] = field(default_factory=list)  # zdjecia >1 raz w klastrze
     status: str = "confirmed"  # confirmed (>= aggregate.min_views widokow) | single_view
+    size_m: float = float("nan")       # mediana rozmiaru fizycznego detekcji (geodetect/size.py)
+    size_n: int = 0                    # liczba detekcji uzytych w medianie
+    flags: list[str] = field(default_factory=list)   # np. size_out_of_range
 
     @property
     def confirmed(self) -> bool:
@@ -83,7 +88,8 @@ def detection_weights(dets: list[GeoDetection], mode: str) -> np.ndarray:
     raise ValueError(f"Nieznany tryb wag: {mode!r} (dozwolone: {WEIGHT_MODES})")
 
 
-def aggregate(detections: list[GeoDetection], cfg: AggregateConfig) -> list[AggregatedObject]:
+def aggregate(detections: list[GeoDetection], cfg: AggregateConfig,
+              size_cfg: Optional[SizeConfig] = None) -> list[AggregatedObject]:
     """Klastruje przyjete detekcje i ustawia im `object_id`. Detekcje odrzucone oraz
     szum DBSCAN (gdy min_samples > 1) zostaja z object_id = None."""
     to_lonlat = Transformer.from_crs("EPSG:2180", "EPSG:4326", always_xy=True)
@@ -100,6 +106,8 @@ def aggregate(detections: list[GeoDetection], cfg: AggregateConfig) -> list[Aggr
             members = [d for d, l in zip(dets, labels) if l == lab]
             obj = _make_object(len(objects), cls_name, members, cfg.weights, to_lonlat)
             obj.status = "confirmed" if obj.n_views >= cfg.min_views else "single_view"
+            if size_cfg is not None and size_cfg.enabled:
+                apply_size(obj, members, size_cfg)
             for d in members:
                 d.object_id = obj.object_id
             objects.append(obj)
@@ -132,3 +140,22 @@ def _make_object(object_id: int, cls_name: str, members: list[GeoDetection],
         mean_range_m=float(np.mean([d.hit.range_m for d in members])),
         duplicate_images=sorted(img for img, c in counts.items() if c > 1),
     )
+
+
+def apply_size(obj: AggregatedObject, members: list[GeoDetection], cfg: SizeConfig) -> None:
+    """Rozmiar obiektu = mediana rozmiarow detekcji (bez uciętych krawedzia kadru, jesli sa inne)
+    i flaga size_out_of_range wg cfg.ranges_m."""
+    from .size import size_flags
+    sized = [d for d in members if d.size is not None and np.isfinite(d.size.size_m)]
+    full = [d for d in sized if not d.touches_border]
+    use = full if (cfg.exclude_border and full) else sized
+    if not use:
+        return
+    obj.size_m = float(np.median([d.size.size_m for d in use]))
+    obj.size_n = len(use)
+    for f in size_flags(obj.cls_name, obj.size_m, cfg.ranges_m):
+        if f not in obj.flags:
+            obj.flags.append(f)
+            rng = cfg.ranges_m.get(obj.cls_name)
+            log.info("Obiekt %d (%s): rozmiar %.2f m poza zakresem %s -> %s",
+                     obj.object_id, obj.cls_name, obj.size_m, rng, f)

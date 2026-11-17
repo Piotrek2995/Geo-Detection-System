@@ -64,6 +64,10 @@ class LeanEstimate:
     footprint_px: int
     scope: str = ""              # "wszystkie budynki w kadrze" | "budynek z GT"
     at_search_bound: bool = False   # optimum na granicy przeszukiwania -> wynik niewiarygodny
+    # lean zalezny od wysokosci (geodetect/lean.py): v = lean / H_kraw [m przesuniecia na 1 m wysokosci]
+    h_edges_m: Optional[float] = None    # mediana NMPT - NMT w pasie 0.5-1.5 m wewnatrz obrysu
+    vx_per_m: Optional[float] = None
+    vy_per_m: Optional[float] = None
 
 
 @dataclass
@@ -257,6 +261,16 @@ def main() -> int:
     ref.orto_sheets = index_metadata(ORTO_INDEX, ORTO_LAYERS, gx, gy)
     ref.nmpt_sheets = index_metadata(NMPT_INDEX, NMPT_LAYERS, gx, gy)
     ref.nmt_sheets = index_metadata(NMT_INDEX, NMT_LAYERS, gx, gy)
+    prev_path = args.out / "reference.json"
+    prev = json.loads(prev_path.read_text(encoding="utf-8")) if prev_path.exists() else {}
+    for k in ("orto_sheets", "nmpt_sheets", "nmt_sheets"):
+        # chwilowa niedostepnosc uslugi skorowidzow: zachowaj metadane z poprzedniego przebiegu
+        new, old = getattr(ref, k), prev.get(k) or []
+        old_ok = {d.get("layer") for d in old if not d.get("error")}
+        kept = [d for d in new if not d.get("error")] + [d for d in old if not d.get("error")
+                                                          and d.get("layer") in {e.get("layer") for e in new
+                                                                                 if e.get("error")}]
+        setattr(ref, k, kept + [d for d in new if d.get("error") and d.get("layer") not in old_ok])
     for k in ("orto_sheets", "nmpt_sheets", "nmt_sheets"):
         for d in getattr(ref, k):
             log.info("%s: %s", k, {kk: d.get(kk) for kk in ("layer", "godlo", "aktualnosc", "wielkoscPiksela",
@@ -282,7 +296,10 @@ def main() -> int:
         orto = get_map(ORTO_WMS, "Raster", bbox, px, False, "image/jpeg")
         egib = get_map(EGIB_WMS, "budynki", bbox, px, True)
     except Exception as exc:
-        log.error("WMS niedostepny: %s", exc)
+        log.error("WMS niedostepny: %s — zachowuje lean z poprzedniego przebiegu", exc)
+        for k in ("lean_gugik", "lean_gugik_all", "lean_odm", "lean_odm_all"):
+            if prev.get(k):
+                setattr(ref, k, prev[k])
         (args.out / "reference.json").write_text(json.dumps(asdict(ref), indent=2, ensure_ascii=False),
                                                  encoding="utf-8")
         return 1
@@ -315,10 +332,24 @@ def main() -> int:
         log.info("Budynek z GT: %d obrys(y), %.0f m2; obrysow w kadrze: %d",
                  sum(1 for m in fps if (m & group).sum() > 0.9 * m.sum()), group.sum() * args.res_m ** 2, len(fps))
 
+        from geodetect.lean import edge_height, lean_model
+
+        def hgrid(xs, ys):
+            xs, ys = np.asarray(xs), np.asarray(ys)
+            return sample_grid(nmpt, xs, ys, "bilinear") - sample_grid(nmt, xs, ys, "bilinear")
+
+        def with_height(est, fp):
+            he, n = edge_height(fp, bbox[0], bbox[3], args.res_m, hgrid)
+            lm = lean_model(est.dx_m, est.dy_m, he, n)
+            est.h_edges_m = he
+            if lm is not None:
+                est.vx_per_m, est.vy_per_m = lm.vx, lm.vy
+            return est
+
         def run(img, tag, title):
             rm = roof_mask(img)
-            g = estimate_lean(rm, group, args.res_m, scope="budynek z GT", exclude=others)
-            a = estimate_lean(rm, union, args.res_m, scope="wszystkie budynki w kadrze")
+            g = with_height(estimate_lean(rm, group, args.res_m, scope="budynek z GT", exclude=others), group)
+            a = with_height(estimate_lean(rm, union, args.res_m, scope="wszystkie budynki w kadrze"), union)
             lean_figure(img, group, g, args.res_m, gt_px, st_px, f"{title}: budynek z GT",
                         args.out / f"lean_{tag}.png")
             lean_figure(img, union, a, args.res_m, gt_px, st_px, f"{title}: wszystkie obrysy",

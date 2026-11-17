@@ -97,14 +97,19 @@ def helmert2d(src, dst) -> dict:
             "rms": rms, "residuals": np.hypot(res[:, 0], res[:, 1]).tolist()}
 
 
-def gt_transfer(pairs_csv: Path, lean: Optional[dict]) -> Optional[dict]:
-    """GT_transfer: pilka na ortofotomapie ODM -> (Helmert z punktow dachu) ortofotomapa GUGiK
-    -> minus przesuniecie dachu (lean) GUGiK. Punkty dachu i pilka leza na tej samej polaci,
-    wiec lean dotyczy ich jednakowo."""
+def gt_transfer(pairs_csv: Path, lean: Optional[dict], height_fn=None) -> Optional[dict]:
+    """GT_transfer: pilka na ortofotomapie ODM -> (Helmert z punktow dachu) -> polozenie prawdziwe.
+
+    Tryb "height" (lean z vx_per_m/vy_per_m i height_fn(x, y) = NMPT - NMT): kazdy punkt dachu
+    z ortofotomapy GUGiK jest korygowany o przesuniecie proporcjonalne do JEGO wysokosci
+    (geodetect/lean.py), Helmert ODM -> polozenia prawdziwe, pilka bez dodatkowej korekty
+    (ortofotomapa ODM jest rektyfikowana na wlasnym DSM). Tryb "uniform" (dawny): Helmert do
+    polozen na ortofotomapie, potem jeden wektor lean odjety od pilki."""
     import csv
     if not pairs_csv.exists():
         return None
-    rows = list(csv.DictReader(open(pairs_csv, encoding="utf-8")))
+    with open(pairs_csv, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
     pts = [r for r in rows if r["kind"] == "punkt_dachu"]
     ball = [r for r in rows if r["kind"] == "pilka"]
     if not pts or not ball:
@@ -120,9 +125,23 @@ def gt_transfer(pairs_csv: Path, lean: Optional[dict]) -> Optional[dict]:
     out = {"n_pairs": h["n"], "scale": h["scale"], "rot_deg": h["rot_deg"], "helmert_rms": h["rms"],
            "residuals": h["residuals"], "ball_odm": bo, "ball_gugik": bg.tolist(),
            "lean_applied": [ldx, ldy], "x": float(bg[0] - ldx), "y": float(bg[1] - ldy),
-           "odm_vs_gugik_shift": [float(bg[0] - bo[0]), float(bg[1] - bo[1])]}
-    log.info("GT_transfer: %d par, skala %.4f, obrot %.2f deg, RMS Helmerta %.3f m -> (%.2f, %.2f)",
-             h["n"], h["scale"], h["rot_deg"], h["rms"], out["x"], out["y"])
+           "odm_vs_gugik_shift": [float(bg[0] - bo[0]), float(bg[1] - bo[1])], "lean_mode": "uniform"}
+    out["x_uniform"], out["y_uniform"] = out["x"], out["y"]
+    if lean and lean.get("vx_per_m") is not None and height_fn is not None:
+        from .lean import LeanModel
+        lm = LeanModel(lean["vx_per_m"], lean["vy_per_m"], lean.get("h_edges_m") or float("nan"), ldx, ldy)
+        corr = [lm.correct(x, y, height_fn) for x, y in dst]
+        hc = helmert2d(src, [(c[0], c[1]) for c in corr])
+        bt = hc["apply"](bo)[0]
+        out.update({"lean_mode": "height", "x": float(bt[0]), "y": float(bt[1]), "helmert_rms": hc["rms"],
+                    "scale": hc["scale"], "rot_deg": hc["rot_deg"], "residuals": hc["residuals"],
+                    "lean_v_per_m": [lm.vx, lm.vy], "lean_h_edges_m": lm.h_edges_m,
+                    "roof_point_heights": [c[2] for c in corr],
+                    "roof_point_shifts": [float(math.hypot(x - c[0], y - c[1])) for (x, y), c in zip(dst, corr)],
+                    "ball_height": float(height_fn(float(bt[0]), float(bt[1]))),
+                    "shift_vs_uniform": [float(bt[0] - out["x_uniform"]), float(bt[1] - out["y_uniform"])]})
+    log.info("GT_transfer (%s): %d par, skala %.4f, obrot %.2f deg, RMS Helmerta %.3f m -> (%.2f, %.2f)",
+             out["lean_mode"], h["n"], out["scale"], out["rot_deg"], out["helmert_rms"], out["x"], out["y"])
     return out
 
 
@@ -268,9 +287,13 @@ def build_report(runner) -> ReferenceReport:
         # punktu na dachu = odczyt z ortofotomapy - (dx, dy)
         rep.gt_corr = (gx - le["dx_m"], gy - le["dy_m"])
     tp = spec.get("ortho_pairs_csv")
+    hfn = None
     if tp:
         tp = Path(tp) if Path(tp).is_absolute() else runner.exp.base_config.parent / tp
-        rep.transfer = gt_transfer(tp, le if le and not le.get("at_search_bound") else None)
+        if spec.get("lean_height_dependent", True) and nmt is not None and nmpt is not None:
+            def hfn(x, y):
+                return sample(nmpt, x, y) - sample(nmt, x, y)
+        rep.transfer = gt_transfer(tp, le if le and not le.get("at_search_bound") else None, hfn)
     gts = {"corr": rep.gt_corr, "transfer": (rep.transfer["x"], rep.transfer["y"]) if rep.transfer else None,
            # pilka na ortofotomapie ODM: odniesienie w ukladzie ODM (spojnosc wewnetrzna, bez bledu
            # georeferencji rekonstrukcji)
@@ -296,10 +319,23 @@ def build_report(runner) -> ReferenceReport:
             return None, []
         rows_ = list(_csv.DictReader(open(f, encoding="utf-8")))
         ball = next(((float(r["odm_x"]), float(r["odm_y"])) for r in rows_ if r["kind"] == "pilka"), None)
-        roof = [((float(r["odm_x"]), float(r["odm_y"])),
-                 (float(r["gugik_x"]) - lean_xy[0], float(r["gugik_y"]) - lean_xy[1]))
+        roof = [((float(r["odm_x"]), float(r["odm_y"])), roof_true(float(r["gugik_x"]), float(r["gugik_y"])))
                 for r in rows_ if r["kind"] == "punkt_dachu"]
         return ball, roof
+
+    _roof_cache: dict = {}
+
+    def roof_true(x, y):
+        """Punkt dachu z ortofotomapy GUGiK -> polozenie prawdziwe (lean zalezny od wysokosci, jesli
+        dostepny, inaczej staly wektor)."""
+        if (x, y) not in _roof_cache:
+            if rep.transfer and rep.transfer.get("lean_mode") == "height":
+                from .lean import LeanModel
+                lm = LeanModel(*rep.transfer["lean_v_per_m"], rep.transfer["lean_h_edges_m"], *lean_xy)
+                _roof_cache[(x, y)] = lm.correct(x, y, hfn)[:2]
+            else:
+                _roof_cache[(x, y)] = (x - lean_xy[0], y - lean_xy[1])
+        return _roof_cache[(x, y)]
 
     first = next(iter(runner.results.values()))
     _BASE_REC.setdefault("name", Path(spec.get("base_odm_dir") or first.cfg.odm_dir).name)
@@ -471,46 +507,11 @@ def plot_error_vs(rep: ReferenceReport, key: str, xlabel: str, path: Path, nmt_p
     return _save(fig, plt, path, f"Błąd poziomy pozycji piłki a {xlabel.split(' [')[0]}")
 
 
-_GEOPORTAL = "https://mapy.geoportal.gov.pl/wss/service"
-_KIEG = "https://integracja.gugik.gov.pl/cgi-bin/KrajowaIntegracjaEwidencjiGruntow"
-
-
-def add_basemaps(m) -> None:
-    """Podklady mapy wynikowej. Pierwszy dodany jest domyslny (ortofotomapa GUGiK).
-
-    Standardowy OpenStreetMap (tile.openstreetmap.org) nie jest uzyty: jego polityka wymaga
-    naglowka Referer, ktorego przegladarka nie wysyla dla pliku otwartego lokalnie (file://),
-    wiec kafelki byly blokowane. Dane OSM sa dostepne przez CARTO (bez tego wymogu)."""
-    import folium
-    wms = folium.raster_layers.WmsTileLayer
-    wms(url=f"{_GEOPORTAL}/PZGIK/ORTO/WMS/HighResolution", layers="Raster", name="Ortofotomapa GUGiK (HR)",
-        fmt="image/jpeg", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
-    wms(url=f"{_GEOPORTAL}/PZGIK/ORTO/WMS/StandardResolution", layers="Raster",
-        name="Ortofotomapa GUGiK (standard)", fmt="image/jpeg", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
-    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                     name="Esri World Imagery", attr="Esri, Maxar, Earthstar Geographics", max_zoom=23,
-                     max_native_zoom=19).add_to(m)
-    folium.TileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
-                     name="OpenStreetMap (CARTO Voyager)", subdomains="abcd", max_zoom=23, max_native_zoom=20,
-                     attr="&copy; OpenStreetMap contributors &copy; CARTO").add_to(m)
-    folium.TileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-                     name="OpenStreetMap (CARTO jasna)", subdomains="abcd", max_zoom=23, max_native_zoom=20,
-                     attr="&copy; OpenStreetMap contributors &copy; CARTO").add_to(m)
-    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
-                     name="Esri Topo", attr="Esri", max_zoom=23, max_native_zoom=19).add_to(m)
-    wms(url=f"{_GEOPORTAL}/img/guest/TOPO/MapServer/WMSServer", layers="Raster", name="Mapa topograficzna GUGiK",
-        fmt="image/png", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
-    wms(url=f"{_GEOPORTAL}/PZGIK/NMT/GRID1/WMS/ShadedRelief", layers="Raster", name="Cieniowanie NMT GUGiK",
-        fmt="image/png", max_zoom=23, overlay=False, attr="GUGiK").add_to(m)
-    # nakladki
-    wms(url=_KIEG, layers="budynki", name="Budynki EGiB", fmt="image/png", transparent=True, max_zoom=23,
-        overlay=True, attr="GUGiK KIEG").add_to(m)
-    wms(url=_KIEG, layers="dzialki,numery_dzialek", name="Dzialki EGiB", fmt="image/png", transparent=True,
-        max_zoom=23, overlay=True, show=False, attr="GUGiK KIEG").add_to(m)
 
 
 def make_map(rep: ReferenceReport, runner, path: Path) -> Path:
     import folium
+    from .basemaps import add_basemaps
     from pyproj import Transformer
     from .expplots import BLUE, ORANGE, AQUA, GREEN, INK2, PURPLE
     t = Transformer.from_crs(2180, 4326, always_xy=True)
@@ -749,8 +750,17 @@ def summary_md(rep: ReferenceReport, runner) -> list[str]:
         t = rep.transfer
         L += [f"GT_transfer: piłka wskazana na ortofotomapie ODM z lotu, przeniesiona na ortofotomapę GUGiK "
               f"transformacją Helmerta 2D z {t['n_pairs']} par punktów dachu (skala {t['scale']:.4f}, obrót "
-              f"{t['rot_deg']:+.2f}°, RMS {_f(t['helmert_rms'])} m), następnie skorygowana o przesunięcie dachu "
-              f"({t['lean_applied'][0]:+.2f}, {t['lean_applied'][1]:+.2f}) m. Pozycja: X {t['x']:.2f}, "
+              f"{t['rot_deg']:+.2f}°, RMS {_f(t['helmert_rms'])} m), "
+              + (f"z punktami dachu skorygowanymi o przesunięcie zależne od wysokości: v = "
+                 f"({t['lean_v_per_m'][0]:+.3f}, {t['lean_v_per_m'][1]:+.3f}) m/m (lean "
+                 f"({t['lean_applied'][0]:+.2f}, {t['lean_applied'][1]:+.2f}) m przy wysokości krawędzi "
+                 f"{t['lean_h_edges_m']:.2f} m), wysokości punktów dachu "
+                 f"{', '.join(f'{h:.1f}' for h in t['roof_point_heights'])} m, piłki {t['ball_height']:.2f} m; "
+                 f"względem dawnej korekty stałym wektorem: ({t['shift_vs_uniform'][0]:+.2f}, "
+                 f"{t['shift_vs_uniform'][1]:+.2f}) m"
+                 if t.get("lean_mode") == "height" else
+                 f"następnie skorygowana o przesunięcie dachu ({t['lean_applied'][0]:+.2f}, "
+                 f"{t['lean_applied'][1]:+.2f}) m") + f". Pozycja: X {t['x']:.2f}, "
               f"Y {t['y']:.2f}; względem GT z Google Maps: ({t['x'] - rep.gt_x:+.2f}, {t['y'] - rep.gt_y:+.2f}) m. "
               f"Przesunięcie ortofotomapy ODM względem GUGiK w punkcie piłki: "
               f"({t['odm_vs_gugik_shift'][0]:+.2f}, {t['odm_vs_gugik_shift'][1]:+.2f}) m."]

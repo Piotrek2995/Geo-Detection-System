@@ -31,6 +31,7 @@ python main.py                                   # config.yaml
 python main.py --config config.yaml
 python main.py --image SING0304.JPG --image SING0316.JPG
 python main.py --all --surface nmt_local --eps 10
+python main.py --all --out output/moj_przebieg   # katalog wyników (domyślnie output/runs/<data_czas>)
 ```
 
 Wszystkie parametry (ścieżki, zdjęcia, źródło DEM, klasy, confidence, ray casting,
@@ -48,31 +49,69 @@ w folderze brakuje pliku), są pomijane z ostrzeżeniem i wymienione w podsumowa
 detekcje są agregowane DBSCAN-em (osobno dla każdej klasy, w EPSG:2180): ten sam obiekt
 widziany na kilku zdjęciach daje jeden punkt z liczbą widoków i rozrzutem.
 
-Wywołanie z kodu (np. z przyszłego GUI):
+Wywołanie z kodu (GUI): `run_pipeline` — tej samej funkcji używa CLI. Bez `print`: postęp
+przez callback (`Progress`: etap, krok, opis, ułamek 0–1), przerwanie przez `CancelToken`
+(sprawdzany przed każdym zdjęciem i między etapami), błędy w `RunResult.error`.
 
 ```python
-from geodetect import PipelineConfig, build_context, run_single
-from geodetect.batch import run_batch, summary_text
-from geodetect.export import export_all
+from geodetect.config import PipelineConfig
+from geodetect.run import CancelToken, run_pipeline
 
 cfg = PipelineConfig.from_file("config.yaml")
-ctx = build_context(cfg)                 # DEM, ODM, model YOLO ładowane raz
-res = run_single(cfg, "SING0304.JPG", ctx)               # jedno zdjęcie
-batch = run_batch(cfg, ctx, images=None,                  # None = wszystkie z ODM
-                  progress_cb=lambda i, n, name: print(i, n, name))
-print(summary_text(batch))
-export_all(batch, cfg.output_dir)
+tok = CancelToken()                      # GUI: przycisk "Przerwij" -> tok.cancel()
+res = run_pipeline(cfg, progress_cb=lambda p: print(p.stage, f"{p.fraction:.0%}", p.message),
+                   cancel=tok, all_images=True)          # out_dir=None -> output/runs/<data_czas>
+if res.ok:
+    res.objects, res.detections, res.qc                   # AggregatedObject, GeoDetection, QcReport
+    res.export["report_html"], res.export["gpkg"]         # pliki wynikowe
 ```
 
-### Pliki wyjściowe (`output/`)
+Etapy: `context` (NMT, ODM, kalibracja Z / 7p, QC, model) → `images` → `aggregate` → `export`
+→ `done`. Niżej poziomowo nadal działają `build_context`, `run_single`, `run_batch`.
+
+### Pliki wyjściowe przebiegu (`output/runs/<data_czas>/` albo `--out`)
+
+Współrzędne: WGS84 (`lon`, `lat`) i PUWG 1992 (`x_2180`, `y_2180`), wysokość `altitude_m` /
+`h_npm` w m n.p.m.
 
 | Plik | Zawartość |
 |---|---|
-| `detections.geojson` | pojedyncze detekcje (WGS84) z polami: `image`, `class`, `class_label`, `conf`, `det_source` (full / tile / merged), `tile_truncated`, `object_id`, `object_status`, `accepted`, `rejected_reason`, `range_m`, `incidence_deg` (kąt promienia od pionu), `touches_border`, `x_2180`, `y_2180`, `altitude_m`, `surface`, `surface_h`, `ground_h`, `above_ground_m`, piksel, bbox |
-| `objects.geojson` | obiekty zagregowane: `status` (`confirmed` / `single_view`), `class_label`, `n_views`, `images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `mean_incidence_deg`, `mean_range_m`, `duplicate_images` |
-| `objects.csv` | to samo co `objects.geojson` + `lon`, `lat` |
-| `detections_map.html` | mapa folium z warstwami: kamery, detekcje, obiekty potwierdzone, obiekty `single_view` (szare wypełnienie, przerywany obrys), linie detekcja→obiekt, odrzucone; popupy z atrybutami |
+| `run_report.html` | raport dla odbiorcy spoza projektu: podsumowanie, obiekty z miniaturami (najlepszy widok), mapa, kontrola jakości, parametry (model, klasy, progi, powierzchnia, kalibracja Z / parametry 7p), statystyki, objaśnienia pojęć |
+| `run_report.json` | to samo w postaci maszynowej |
+| `map.html` | mapa folium: podkłady (ortofotomapa GUGiK, Esri, CARTO/OSM, TOPO, cieniowanie NMT, nakładki EGiB), legenda klas, kamery, detekcje, obiekty `confirmed` / `single_view` / z flagą rozmiaru (czerwony pierścień), dymek z miniaturą obiektu |
+| `results.gpkg` | GeoPackage EPSG:2180 (3D): warstwy `objects`, `detections`, `cameras`, `rays` (kamera → trafienie) |
+| `objects.geojson`, `detections.geojson` | WGS84 `[lon, lat, h_npm]` |
+| `objects.csv`, `detections.csv` | tabele atrybutów (listy rozdzielone `;`) |
+| `objects.kml` | obiekty (styl wg klasy, flagowane na czerwono) + ukryty folder detekcji |
+| `thumbs/obj_NNN.jpg` | wycinek najlepszego widoku obiektu z ramką detekcji |
 | `spread.png` | odchylenie detekcji od środka obiektu w funkcji `incidence_deg` i `range_m` |
+
+Atrybuty obiektu: `class`, `class_label`, `status` (`confirmed` / `single_view`), `n_views`,
+`images`, `rms_m`, `max_m` (rozrzut od środka), `mean_conf`, `size_m`, `flags`
+(np. `size_out_of_range`), `surface` (powierzchnia ray castingu), `georef_mode`, `qc_status`,
+`mean_incidence_deg`, `mean_range_m`, `duplicate_images`. Detekcje dodatkowo: `conf`, `range_m`,
+`incidence_deg`, `size_m` / `size_simple_m`, `touches_border`, `accepted` / `rejected_reason`,
+`surface_h`, `ground_h`, `above_ground_m`, piksel, bbox. GPKG zapisywany bez GDAL
+(`geodetect/gpkg.py`, sqlite3), sprawdzony odczytem GDAL/OGR.
+
+Eksperymenty (`experiments/*.yaml`) zapisują per wariant zestaw podstawowy (`export_all`:
+GeoJSON, `objects.csv`, `detections_map.html`, `spread.png`).
+
+### Rozmiar fizyczny obiektów (`size`)
+
+`geodetect/size.py`: promienie przez środki czterech krawędzi bboxa przecinane z poziomą
+płaszczyzną na wysokości trafienia. Wymiary lewa–prawa i góra–dół to wymiary poziome obiektu,
+z uwzględnieniem kąta padania: wzdłuż pochylenia promienia `bbox_px · R / f / cos θ`, w poprzek
+`bbox_px · R / f`. `size_m` to większy z nich. Rozmiar obiektu to mediana po widokach (bez detekcji
+uciętych krawędzią kadru). Poza zakresem `size.ranges_m` obiekt dostaje flagę `size_out_of_range`:
+nie jest usuwany, tylko oznaczany w eksporcie i na mapie.
+
+Przybliżenie zakłada obiekt płaski. Obiekt wysoki oglądany ukośnie jest zawyżony o ~H·tan θ
+(namiot ~2 m przy θ 60°: 7–8 m zamiast ~5 m w pojedynczym widoku). Przy cos θ < `min_cos_incidence`
+używane jest `bbox_px · R / f`.
+
+Lot testowy: namiot 5,5 m (mediana z 26 widoków), ludzie 1,9 i 2,5 m, fałszywe „namioty” na dachu
+(SING0310, SING0312) ok. 25 m → `size_out_of_range`; piłka 0,41 m (średnica 0,22 m — luźny bbox).
 
 Pole `duplicate_images` (i ostrzeżenie w podsumowaniu) oznacza klaster, w którym to samo
 zdjęcie występuje więcej niż raz. To może znaczyć, że scalono dwa blisko położone obiekty.
@@ -230,19 +269,32 @@ w `experiments/pilka.yaml`.
 
 ### Kontrola jakości rekonstrukcji (`qc`)
 
-`geodetect/qc.py` działa w `build_context` na georeferencji `gps_only`. Wynik (OK / OSTRZEŻENIE /
-ZŁY + zalecenia) trafia do podsumowania batcha i do `summary.md` eksperymentów:
+`geodetect/qc.py` działa w `build_context`, po ewentualnym 7p. Skala pionowa, ogniskowa i baza
+liczone są na georeferencji `gps_only`. Zgodność z NMPT liczona jest dla **aktywnej** georeferencji
+(z_anchor, z pochyleniem jeśli `apply_tilt`, albo 7p), obok wartości „przed” (`gps_only` + z_offset).
+Liczona jest tylko w promieniu `qc.core_radius_m` (30 m) od kamer, bo krańce DSM ODM są ekstrapolowane.
+Do reszt dopasowywana jest odporna płaszczyzna: jej pochylenie to kontrola `tilt`, a NMAD reszt po
+jej usunięciu to kontrola `surface` (zgodność kształtu). Wynik (OK / OSTRZEŻENIE / ZŁY + zalecenia)
+trafia do podsumowania batcha, raportu przebiegu i `summary.md` eksperymentów:
 
 | kontrola | miara | domyślne progi (ostrzeżenie / zły) |
 |---|---|---|
 | skala pionowa | nachylenie k regresji h_ODM kamer vs wysokość barometryczna EXIF | \|k − 1\| > 0,10 / 0,20 (i > 2σ / 3σ nachylenia) |
 | ogniskowa | f ODM vs `qc.camera_focal` (albo EXIF f35 — wtedy najwyżej ostrzeżenie) | 10 % / 25 % |
-| zgodność z NMPT | NMAD(DSM ODM − NMPT) | 0,5 / 1,5 m |
-| baza kamer | √2·σ_GPS / rozpiętość kamer (oczekiwany błąd orientacji) | 2° / 5° |
+| zgodność kształtu z NMPT (`surface`) | NMAD(DSM ODM − NMPT) po usunięciu płaszczyzny | 0,75 / 1,5 m |
+| pochylenie modelu (`tilt`) | nachylenie płaszczyzny reszt DSM ODM − NMPT | 2° / 6° |
+| baza kamer | √2·σ_GPS / rozpiętość kamer (oczekiwany błąd orientacji) | 2° / 5° (przy 7p najwyżej ostrzeżenie) |
+
+Wyniki (lot „namiot” / „piłka” stara / „piłka” fixcal):
+
+| tryb | namiot | piłka, stara | piłka, fixcal |
+|---|---|---|---|
+| gps_only + dem_alignment | OSTRZEŻENIE (pochylenie 3,9°, NMAD kształtu 0,32 m) | ZŁY (k 0,68, 14,7°, baza) | ZŁY (9,1°, NMAD 3,4 m, baza) |
+| 7p | OSTRZEŻENIE (1,2°, 0,29 m; ostrzeżenia: EXIF, baza) | ZŁY (k 0,68, NMAD 2,8 m) | ZŁY (NMAD 1,9 m; pochylenie 0,4°) |
 
 Zalecenia QC:
 - „ustal kalibrację kamery”: przy złej skali pionowej lub ogniskowej, bo wtedy 7p tylko kompensuje deformację;
-- „rozważ 7p”: przy niezgodności z NMPT lub słabej bazie;
+- „rozważ 7p”: przy niezgodności z NMPT, pochyleniu lub słabej bazie (nie, gdy 7p już działa);
 - „GCP / większa baza”: przy bardzo słabej bazie.
 
 Domyślnie pozostaje `gps_only` + `dem_alignment`, a 7p jest opcją zalecaną przez QC.
@@ -410,7 +462,9 @@ geodetect/
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
   zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment / start_point
   align.py      georef similarity_nmpt: wyrównanie 7p rekonstrukcji ODM do NMPT (kamery, DSM)
-  qc.py         kontrola jakości rekonstrukcji (skala pionowa, ogniskowa, NMPT, baza kamer)
+  qc.py         kontrola jakości rekonstrukcji (skala pionowa, ogniskowa, NMPT przed/po, pochylenie, baza)
+  lean.py       przesunięcie dachu na ortofotomapie zależne od wysokości (walidacja GT_transfer)
+  size.py       rozmiar fizyczny obiektu z bboxa (kąt padania), flaga size_out_of_range
   detect.py     Detector (YOLO: klasy po nazwie, progi, kafle), list_models / model_info
   tiling.py     siatka kafli, scalanie detekcji z kafli (ucięte boxy, NMS)
   gt_labels.py  etykiety YOLO z eksportu Roboflow jako ground truth (letterbox, obrót)
@@ -421,7 +475,10 @@ geodetect/
   pipeline.py   build_context, run_single -> ImageResult (+ atrybuty i filtry detekcji)
   batch.py      run_batch -> BatchResult, summary_text
   aggregate.py  DBSCAN, AggregatedObject (pozycja ważona, widoki, rozrzut)
-  export.py     GeoJSON, CSV, mapa folium z warstwami, wykres rozrzutu
+  run.py        run_pipeline(cfg, progress_cb, cancel) -> RunResult (API dla GUI i CLI)
+  export.py     eksport przebiegu: GeoJSON, CSV, GPKG, KML, mapa folium, miniatury, run_report.html/json
+  gpkg.py       zapis/odczyt GeoPackage przez sqlite3 (bez GDAL)
+  basemaps.py   podkłady map folium (GUGiK WMS, Esri, CARTO, EGiB)
   diagnostics.py residua wzdłuż/w poprzek promienia, multiview_check (skan z_offset)
   experiments.py eksperymenty z YAML: warianty, cache detekcji, metryki, summary.md
   expplots.py   wykresy i podglądy eksperymentów

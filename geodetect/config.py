@@ -186,6 +186,17 @@ class FilterConfig:
 
 
 @dataclass
+class SizeConfig:
+    """Fizyczny rozmiar obiektow (geodetect/size.py): bbox_px * R / f z katem padania, mediana
+    po widokach. ranges_m: {klasa (nazwa z modelu): [min, max]} [m] — poza zakresem obiekt
+    dostaje flage size_out_of_range (nie jest usuwany). Brak klasy w ranges_m = bez filtra."""
+    enabled: bool = True
+    ranges_m: dict[str, list] = field(default_factory=dict)
+    min_cos_incidence: float = 0.3      # ponizej: rozmiar bez korekty kata (niestabilna)
+    exclude_border: bool = True         # detekcje uciete krawedzia kadru pomijane w medianie
+
+
+@dataclass
 class AggregateConfig:
     """DBSCAN w EPSG:2180, osobno dla kazdej klasy.
     weights: "equal" | "conf" | "cos_incidence" — wagi sredniej pozycji obiektu."""
@@ -224,8 +235,8 @@ class StartConfig:
 
 @dataclass
 class QcConfig:
-    """Kontrola jakosci rekonstrukcji (geodetect/qc.py), uruchamiana w build_context na
-    georeferencji gps_only. Status: OK / OSTRZEZENIE / ZLY + zalecenia (7p, kalibracja kamery)."""
+    """Kontrola jakosci rekonstrukcji (geodetect/qc.py), uruchamiana w build_context; skala
+    pionowa i baza na georeferencji gps_only, zgodnosc z NMPT przed (gps_only) i po (tryb aktywny). Status: OK / OSTRZEZENIE / ZLY + zalecenia (7p, kalibracja kamery)."""
     enabled: bool = True
     vertical_scale_warn: float = 0.10   # |k - 1|, k: h_ODM kamer vs alt_EXIF (barometr)
     vertical_scale_bad: float = 0.20
@@ -233,8 +244,13 @@ class QcConfig:
     camera_focal: Optional[float] = None    # kalibracja referencyjna f/max(w,h); None -> EXIF f35
     focal_warn_pct: float = 10.0
     focal_bad_pct: float = 25.0
-    surface_nmad_warn_m: float = 0.5    # NMAD(DSM ODM - NMPT) po odjeciu mediany
+    # reszty DSM ODM - NMPT liczone dla AKTYWNEJ georeferencji (z_anchor / 7p), "przed" = gps_only
+    surface_nmad_warn_m: float = 0.75   # NMAD reszt po usunieciu plaszczyzny (zgodnosc ksztaltu)
     surface_nmad_bad_m: float = 1.5
+    tilt_warn_deg: float = 2.0          # pochylenie plaszczyzny reszt (przechyl modelu wzgledem NMPT)
+    tilt_bad_deg: float = 6.0
+    core_radius_m: float = 30.0         # tylko punkty DSM blizej niz tyle od najblizszej kamery
+                                        # (krance DSM ODM sa ekstrapolowane: NMAD 2 m vs 0.5 m w srodku)
     sample_step_m: float = 1.0
     rotation_warn_deg: float = 2.0      # sqrt(2) * sigma_GPS / rozpietosc kamer
     rotation_bad_deg: float = 5.0
@@ -357,6 +373,7 @@ class PipelineConfig:
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
     georef: GeorefConfig = field(default_factory=GeorefConfig)
     qc: QcConfig = field(default_factory=QcConfig)
+    size: SizeConfig = field(default_factory=SizeConfig)
     surface: SurfaceConfig = field(default_factory=SurfaceConfig)
     point: PointConfig = field(default_factory=PointConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
@@ -444,7 +461,7 @@ _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "ra
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
            "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig,
            "start": StartConfig, "georef": GeorefConfig,
-           "qc": QcConfig}
+           "qc": QcConfig, "size": SizeConfig}
 
 
 def _build(cls, data: dict[str, Any]):

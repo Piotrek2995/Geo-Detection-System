@@ -69,6 +69,7 @@ class GeoDetection:
     rejected_reason: Optional[str] = None   # None = przyjeta
     object_id: Optional[int] = None         # nadawane przy agregacji
     point: Optional[PointChoice] = None     # metoda punktu, fallback, jakosc maski
+    size: Optional[object] = None           # size.SizeEstimate (rozmiar fizyczny z bboxa)
 
     @property
     def ray_uvs(self) -> np.ndarray:
@@ -109,15 +110,8 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
     z_cal = calibrate_z(config, dem, rec, base_frame)
     log.info("Kalibracja Z — %s", z_cal.describe())
-    qc = None
-    if config.qc.enabled:
-        # na georeferencji gps_only (przed ewentualnym 7p): ocena rekonstrukcji i zalecenie trybu
-        from .qc import run_qc
-        try:
-            qc = run_qc(config, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt), dem)
-        except Exception as exc:          # QC jest diagnostyka — nie blokuje przetwarzania
-            log.warning("Kontrola jakosci rekonstrukcji pominieta: %s", exc)
     config.georef.validate()
+    rec_gps, z_cal_gps = rec, z_cal
     alignment = None
     if config.georef.mode == "similarity_nmpt":
         # Wyrownanie 7p do NMPT: z_anchor daje tylko start (tz). W ukladzie wyrownanym
@@ -128,6 +122,7 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
         z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
         if config.surface.source == "odm_dsm":
             surface = alignment.dsm_surface()
+    qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, alignment, dem) if config.qc.enabled else None
     cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
                      for n in rec.image_names])
     if surface is None:
@@ -144,6 +139,27 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     ctx.alignment = alignment
     ctx.qc = qc
     return ctx
+
+
+def _run_qc(config, rec_gps, base_frame, z_cal, alignment, dem):
+    """QC: skala pionowa i baza na gps_only; zgodnosc z NMPT przed (gps_only + z_offset) i po
+    (tryb aktywny: z_anchor z pochyleniem, jesli stosowane, albo 7p). Nie blokuje przetwarzania."""
+    from .qc import run_qc
+    before = base_frame.with_z_offset(z_cal.offset)
+    if alignment is not None:
+        sim = alignment.result.sim
+        active, mode = sim.apply, "similarity_nmpt" + ("" if config.georef.use_baro_prior else " bez baro")
+    else:
+        fr = base_frame.with_z_offset(z_cal.offset, z_cal.tilt)
+
+        def active(P):
+            return np.column_stack([P[:, :2], fr.npm_height(P[:, 2], P[:, 0], P[:, 1])])
+        mode = f"gps_only + {z_cal.method}" + (" z pochyleniem" if z_cal.tilt is not None and "tilt" not in z_cal.method else "")
+    try:
+        return run_qc(config, rec_gps, before, dem, active=active, mode=mode)
+    except Exception as exc:
+        log.warning("Kontrola jakosci rekonstrukcji pominieta: %s", exc)
+        return None
 
 
 def run_single(config: PipelineConfig, image_name: str,
@@ -177,6 +193,10 @@ def run_single(config: PipelineConfig, image_name: str,
                           touches_border(det.bbox, io.width, io.height,
                                          config.filters.border_margin_px))
         gd.point = choice
+        if config.size.enabled:
+            from .size import detection_size
+            gd.size = detection_size(det.bbox, io, eo, hit.enu, hit.range_m, incidence,
+                                     config.size.min_cos_incidence)
         gd.rejected_reason = rejection_reason(gd, config.filters)
         result.detections.append(gd)
     n_rej = sum(not gd.accepted for gd in result.detections)

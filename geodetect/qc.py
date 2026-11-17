@@ -10,8 +10,13 @@ Kontrole (progi w cfg.qc):
                     43.27 mm). EXIF moze nie uwzgledniac kadrowania obrazu (Potensic Atom LT:
                     f35 = 13 -> 0.345, a geometria wskazuje 0.528), wiec porownanie z EXIF daje
                     najwyzej OSTRZEZENIE.
-  surface         — NMAD reszt DSM ODM - NMPT (po odjeciu mediany; z biezacym z_offset) — miara
-                    zgodnosci georeferencji (pochylenie, obrot, przesuniecie) z danymi GUGiK.
+  surface, tilt   — reszty DSM ODM - NMPT dla AKTYWNEJ georeferencji (z_anchor z ewentualnym
+                    apply_tilt albo 7p), obok wartosci "przed" (gps_only + z_offset). Do reszt
+                    dopasowana odporna plaszczyzna: tilt = jej pochylenie (przechyl modelu
+                    wzgledem NMPT — wplywa na polozenie trafien proporcjonalnie do H nad gruntem),
+                    surface = NMAD reszt po usunieciu plaszczyzny (zgodnosc ksztaltu: deformacje,
+                    obrot, przesuniecie poziome). Pochylenie ~2-3 deg typowe przy gps_only (tez
+                    w dobrym locie) — OSTRZEZENIE, nie ZLY; 7p je usuwa.
   baseline        — rozpietosc pozioma kamer vs szum GPS: oczekiwany blad orientacji modelu
                     ~ sqrt(2) * sigma_GPS / rozpietosc [rad] (lot "pilka": 11 m, ~20 deg).
 
@@ -131,6 +136,65 @@ def check_surface(residuals, cfg, ref_name: str = "NMPT") -> QcCheck:
                    {"nmad": nmad, "median": med, "frac_1m": frac, "n": len(r), "ref": ref_name})
 
 
+def fit_plane(xy, r, iters: int = 5) -> tuple[np.ndarray, np.ndarray]:
+    """Odporna plaszczyzna r ~ a*(x-x0) + b*(y-y0) + c (LSQ z odrzucaniem |e| > 3 NMAD).
+    Zwraca (a, b, c) i maske punktow uzytych."""
+    xy = np.asarray(xy, float)
+    r = np.asarray(r, float)
+    ok = np.isfinite(r)
+    A = np.column_stack([xy - xy[ok].mean(0), np.ones(len(r))])
+    # start bez punktow odstajacych (roslinnosc, zmiany terenu: ogon reszt zaburza LSQ)
+    med = np.median(r[ok])
+    nmad0 = 1.4826 * np.median(np.abs(r[ok] - med))
+    use = ok & (np.abs(r - med) <= max(2 * nmad0, 0.5))
+    coef = np.zeros(3)
+    for _ in range(iters):
+        coef = np.linalg.lstsq(A[use], r[use], rcond=None)[0]
+        e = r - A @ coef
+        nmad = 1.4826 * np.median(np.abs(e[ok] - np.median(e[ok])))
+        use = ok & (np.abs(e) <= max(3 * nmad, 0.3))
+    return coef, use
+
+
+def surface_stats(xy, residuals) -> dict:
+    """NMAD surowych reszt, pochylenie odpornej plaszczyzny i NMAD po jej usunieciu."""
+    r = np.asarray(residuals, float)
+    ok = np.isfinite(r)
+    xy = np.asarray(xy, float)[ok]
+    r = r[ok]
+    if len(r) < 20:
+        return {"n": int(len(r))}
+    nmad = lambda v: float(1.4826 * np.median(np.abs(v - np.median(v))))  # noqa: E731
+    coef, _ = fit_plane(xy, r)
+    e = r - np.column_stack([xy - xy.mean(0), np.ones(len(r))]) @ coef
+    return {"n": int(len(r)), "median": float(np.median(r)), "nmad_raw": nmad(r),
+            "tilt_deg": float(math.degrees(math.atan(math.hypot(coef[0], coef[1])))),
+            "tilt_azimuth_deg": float(math.degrees(math.atan2(coef[0], coef[1])) % 360),
+            "nmad_plane": nmad(e)}
+
+
+def check_surface_modes(before: Optional[dict], after: dict, cfg, ref_name: str = "NMPT",
+                        mode: str = "") -> list[QcCheck]:
+    """Kontrole surface (ksztalt, NMAD po usunieciu plaszczyzny) i tilt dla trybu aktywnego;
+    wartosci "przed" (gps_only) w opisie i szczegolach."""
+    if after.get("n", 0) < 20:
+        return [QcCheck("surface", NA, None, f"zgodność DSM ODM z {ref_name}: za mało punktów")]
+    b = before if before and before.get("n", 0) >= 20 else None
+    fmt = lambda k, u: (f"{b[k]:.2f}{u} → " if b else "")  # noqa: E731
+    lab = f" [{mode}]" if mode else ""
+    surf = QcCheck("surface", _grade(after["nmad_plane"], cfg.surface_nmad_warn_m, cfg.surface_nmad_bad_m),
+                   after["nmad_plane"],
+                   f"DSM ODM − {ref_name}{lab}: NMAD bez pochylenia {fmt('nmad_plane', '')}{after['nmad_plane']:.2f} m, "
+                   f"surowe {fmt('nmad_raw', '')}{after['nmad_raw']:.2f} m (przed → po; n {after['n']}, "
+                   f"≤ {cfg.core_radius_m:.0f} m od kamer)",
+                   {"before": b, "after": after, "ref": ref_name, "mode": mode})
+    tilt = QcCheck("tilt", _grade(after["tilt_deg"], cfg.tilt_warn_deg, cfg.tilt_bad_deg), after["tilt_deg"],
+                   f"pochylenie modelu względem {ref_name}{lab}: {fmt('tilt_deg', '°')}{after['tilt_deg']:.2f}° "
+                   f"(azymut spadku {after['tilt_azimuth_deg']:.0f}°)",
+                   {"before": b, "after": after, "mode": mode})
+    return [surf, tilt]
+
+
 def check_baseline(xy, sigma_gps_m: float, cfg) -> QcCheck:
     xy = np.asarray(xy, float)
     if len(xy) < 2:
@@ -143,7 +207,8 @@ def check_baseline(xy, sigma_gps_m: float, cfg) -> QcCheck:
                    f"modelu ~{rot:.1f}°", {"span_m": span, "sigma_gps_m": sigma_gps_m, "rotation_deg": rot})
 
 
-def summarize(checks: list[QcCheck]) -> QcReport:
+def summarize(checks: list[QcCheck], aligned: bool = False) -> QcReport:
+    """aligned=True (georef 7p aktywne): bez zalecenia 7p."""
     status = max((c.status for c in checks), key=lambda s: _RANK[s], default=NA)
     if status == NA:
         status = OK
@@ -153,7 +218,7 @@ def summarize(checks: list[QcCheck]) -> QcReport:
         by.get("focal") and by["focal"].status == BAD)
     if geom_bad:
         rec.append(REC_CALIB)
-    if any(by.get(n) and by[n].status in (WARN, BAD) for n in ("surface", "baseline")):
+    if not aligned and any(by.get(n) and by[n].status in (WARN, BAD) for n in ("surface", "tilt", "baseline")):
         rec.append(REC_7P + (" — po ustaleniu kalibracji" if geom_bad else ""))
     if by.get("baseline") and by["baseline"].status == BAD:
         rec.append(REC_BASE)
@@ -165,11 +230,15 @@ def summarize(checks: list[QcCheck]) -> QcReport:
 _CACHE: dict = {}
 
 
-def run_qc(config, rec, frame, dem=None) -> QcReport:
-    """rec — rekonstrukcja w georeferencji gps_only; frame — z_offset z z_anchor."""
+def run_qc(config, rec, frame, dem=None, active=None, mode: str = "gps_only") -> QcReport:
+    """rec — rekonstrukcja w georeferencji gps_only; frame — z_offset z z_anchor (bez pochylenia:
+    stan "przed"). active(P) -> (x, y, H npm) dla punktow DSM w ukladzie L — odwzorowanie trybu
+    aktywnego (apply_tilt / 7p); None = jak frame. mode — etykieta trybu aktywnego."""
     from .exif import read_gps
     q = config.qc
-    key = json.dumps([str(rec.path), str(config.odm_dsm_path), round(frame.z_offset, 4),
+    probe = (np.round(np.asarray(active(np.array([[0.0, 0.0, 0.0], [100.0, 50.0, 10.0]])), float), 4).tolist()
+             if active is not None else None)          # odcisk odwzorowania aktywnego (klucz cache)
+    key = json.dumps([str(rec.path), str(config.odm_dsm_path), round(frame.z_offset, 4), mode, probe,
                       json.loads(json.dumps(q.__dict__, default=str)), str(config.surface.nmpt_dir)])
     if key in _CACHE:
         return _CACHE[key]
@@ -201,18 +270,24 @@ def run_qc(config, rec, frame, dem=None) -> QcReport:
     checks.append(check_focal(float(cam.get("focal_x", cam.get("focal", 0.0))), q, f35, w, hh))
 
     try:
-        checks.append(_surface_check(config, frame, np.array(xy)))
+        checks += _surface_checks(config, frame, np.array(xy), active, mode)
     except (FileNotFoundError, ValueError, IndexError) as exc:
         checks.append(QcCheck("surface", NA, None, f"zgodność DSM ODM z NMPT: pominięta ({exc})"))
-    checks.append(check_baseline(np.array(xy), config.georef.sigma_gps_xy_m, q))
-    rep = summarize(checks)
+    aligned = mode.startswith("similarity")
+    base = check_baseline(np.array(xy), config.georef.sigma_gps_xy_m, q)
+    if aligned and base.status == BAD:
+        # orientacja z wyrownania do NMPT, nie z GPS — baza sprawdzana posrednio przez tilt/surface
+        base = QcCheck(base.name, WARN, base.value, base.text + " — orientacja z 7p (kontrola: pochylenie "
+                       "i NMAD po wyrównaniu)", base.details)
+    checks.append(base)
+    rep = summarize(checks, aligned=aligned)
     for line in rep.lines():
         log.info(line)
     _CACHE[key] = rep
     return rep
 
 
-def _surface_check(config, frame, cams_xy) -> QcCheck:
+def _surface_checks(config, frame, cams_xy, active, mode) -> list[QcCheck]:
     from .align import dsm_points_local
     from .surface import _bounds_in, _read_crs, area_bounds_2180, load_mosaic, raster_files, sample_grid
     dsm = Path(config.odm_dsm_path)
@@ -226,5 +301,15 @@ def _surface_check(config, frame, cams_xy) -> QcCheck:
                        _bounds_in(crs, area_bounds_2180(config, np.vstack([cams_xy, P[:, :2]]))))
     # DSM wygladzony do oczka referencji: porownanie 1 m z 1 m
     P = dsm_points_local(dsm, frame, config.qc.sample_step_m, smooth_m=grid.res_x)
-    H = frame.npm_height(P[:, 2], P[:, 0], P[:, 1])
-    return check_surface(H - sample_grid(grid, P[:, 0], P[:, 1], "bilinear"), config.qc, label)
+
+    # strefa rdzeniowa: w poblizu kamer (polozenie z ukladu gps_only; 7p przesuwa o kilka m)
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(cams_xy).query(P[:, :2])
+    P = P[d <= config.qc.core_radius_m]
+
+    def resid(Q):
+        return Q[:, :2], Q[:, 2] - sample_grid(grid, Q[:, 0], Q[:, 1], "bilinear")
+    before = np.column_stack([P[:, :2], frame.npm_height(P[:, 2], P[:, 0], P[:, 1])])
+    sb = surface_stats(*resid(before))
+    sa = surface_stats(*resid(np.asarray(active(P), float))) if active is not None else sb
+    return check_surface_modes(sb, sa, config.qc, label, mode)
