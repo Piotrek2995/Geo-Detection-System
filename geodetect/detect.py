@@ -118,6 +118,18 @@ def validate_class_names(names: Iterable[str], available: Iterable[str], what: s
         raise ValueError(f"{what}: klas {missing} nie ma w modelu (dostepne klasy: {available})")
 
 
+def top_k_per_class(dets: list[Detection], k: Optional[int]) -> list[Detection]:
+    """k najpewniejszych detekcji kazdej klasy (None = bez ograniczenia)."""
+    if k is None:
+        return dets
+    out, seen = [], {}
+    for d in sorted(dets, key=lambda d: -d.conf):
+        if seen.get(d.cls_name, 0) < k:
+            out.append(d)
+            seen[d.cls_name] = seen.get(d.cls_name, 0) + 1
+    return out
+
+
 # ───────────── detektor ─────────────
 
 class Detector:
@@ -190,9 +202,11 @@ class Detector:
         """Detekcje dla wielu zdjec; bez kafli zdjecia ida do modelu paczkami po cfg.batch."""
         self.n_images += len(image_paths)
         if self.cfg.tiling.enabled:
-            return [self._detect_tiled(Path(p)) for p in image_paths]
-        res = self._predict([str(p) for p in image_paths], self._min_conf())
-        return [self._to_detections(r) for r in res]
+            out = [self._detect_tiled(Path(p)) for p in image_paths]
+        else:
+            res = self._predict([str(p) for p in image_paths], self._min_conf())
+            out = [self._to_detections(r) for r in res]
+        return [top_k_per_class(d, self.cfg.top_k_per_class) for d in out]
 
     def _detect_tiled(self, image_path: Path) -> list[Detection]:
         import cv2
@@ -223,3 +237,81 @@ class Detector:
         log.debug("%s: %d kafli, %d detekcji surowych -> %d po scaleniu", image_path.name,
                   len(tiles), len(dets), len(merged))
         return merged
+
+
+# ───────────── punkty reczne ─────────────
+
+@dataclass
+class ManualPoint:
+    image: str
+    u: Optional[float]
+    v: Optional[float]
+    visible: bool
+    conf: Optional[float] = None
+    box: Optional[tuple[float, float, float, float]] = None   # x1,y1,x2,y2 (CSV detekcji)
+
+
+def read_manual_points(path: Path) -> dict[str, ManualPoint]:
+    """CSV image,u,v,visible[,conf][,x1,y1,x2,y2]. Puste u/v albo visible=0 -> brak punktu."""
+    import csv
+
+    def num(row, k):
+        t = (row.get(k) or "").strip()
+        return float(t) if t else None
+
+    out = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            name = (row.get("image") or "").strip()
+            if not name:
+                continue
+            u, v = num(row, "u"), num(row, "v")
+            vis = (row.get("visible") or "").strip().lower() in ("1", "true", "tak", "yes", "t")
+            box = tuple(num(row, k) for k in ("x1", "y1", "x2", "y2"))
+            out[name] = ManualPoint(name, u, v, vis and u is not None and v is not None,
+                                    num(row, "conf"), box if None not in box else None)
+    return out
+
+
+class ManualDetector:
+    """Interfejs Detector: "detekcje" z pliku CSV zamiast inferencji.
+
+    source=manual: recznie wskazane piksele (cfg.manual_csv), conf 1, bbox manual_box_px;
+    source=csv:    zapisane wczesniej detekcje innego detektora (cfg.detections_csv, np. YOLOE
+                   z promptem wizualnym z scripts/pilka_detectors.py), conf i bbox z pliku."""
+
+    task = "manual"
+
+    def __init__(self, cfg: DetectConfig, source: str = "manual"):
+        path = cfg.manual_csv if source == "manual" else cfg.detections_csv
+        if path is None:
+            raise ValueError(f"detect.source={source} wymaga detect."
+                             f"{'manual_csv' if source == 'manual' else 'detections_csv'}")
+        self.cfg, self.source = cfg, source
+        self.points = read_manual_points(Path(path))
+        self.names = {0: cfg.manual_class}
+        self.infer_s, self.n_images = 0.0, 0
+        log.info("Detekcje z CSV (%s): %s (%d widocznych z %d)", source, path,
+                 sum(p.visible for p in self.points.values()), len(self.points))
+
+    def detect(self, image_path) -> list[Detection]:
+        self.n_images += 1
+        p = self.points.get(Path(image_path).name)
+        if p is None or not p.visible:
+            return []
+        h = self.cfg.manual_box_px / 2
+        box = p.box if self.source == "csv" and p.box else (p.u - h, p.v - h, p.u + h, p.v + h)
+        conf = p.conf if self.source == "csv" and p.conf is not None else 1.0
+        return [Detection(0, self.cfg.manual_class, conf, box, source=self.source)]
+
+    def detect_many(self, image_paths) -> list[list[Detection]]:
+        return [self.detect(p) for p in image_paths]
+
+
+def make_detector(model_path: Path, cfg: DetectConfig):
+    """Detector (YOLO) albo ManualDetector wg cfg.source."""
+    if cfg.source in ("manual", "csv"):
+        return ManualDetector(cfg, cfg.source)
+    if cfg.source != "model":
+        raise ValueError(f"Nieznane detect.source={cfg.source!r} (model | manual | csv)")
+    return Detector(model_path, cfg)

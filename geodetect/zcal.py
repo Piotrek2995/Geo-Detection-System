@@ -5,7 +5,9 @@ ODM (kamery, chmura punktow, DEM ODM) sa w ukladzie "h wzgledem startu", nie npm
 Tryby (cfg.z_anchor.mode):
   agl_assumption — zalozona wysokosc lotu nad terenem (fallback),
   ground_frame   — klatka zrobiona na ziemi w punkcie startu,
-  dem_alignment  — dopasowanie DEM z ODM do NMT (mediana roznic w otwartym terenie).
+  dem_alignment  — dopasowanie DEM z ODM do NMT (mediana roznic w otwartym terenie),
+  start_point    — znany punkt startu + mapowanie wysokosci EXIF -> ODM po kamerach,
+  fixed          — z_offset podany wprost.
 """
 
 from __future__ import annotations
@@ -86,7 +88,7 @@ class ZCalibration:
     def describe(self) -> str:
         parts = [f"{self.method}: z_offset={self.offset:.3f} m"]
         parts += [f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}"
-                  for k, v in self.stats.items()]
+                  for k, v in self.stats.items() if not isinstance(v, dict)]
         if self.tilt is not None:
             parts.append(f"tilt a={self.tilt.a:.5f} b={self.tilt.b:.5f} (stosowany)")
         return ", ".join(parts)
@@ -145,6 +147,122 @@ def ground_frame(rec: OdmReconstruction, image: Optional[str], dem: DemSampler,
     return ZCalibration(offset, "ground_frame", stats={
         "image": image, "nmt_anchor": nmt, "h_anchor_odm": float(h),
         "lens_height_m": lens_height_m, "x_2180": float(x), "y_2180": float(y)})
+
+
+# ───────────── tryb 4: punkt startu ─────────────
+
+@dataclass
+class StartPoint:
+    """Polozenie startu i kontrola barometru na zdjeciu startowym."""
+    lat: float
+    lon: float
+    x_2180: float
+    y_2180: float
+    xy_source: str                 # "latlon" (pomiar niezalezny) | "exif:<zdjecie>"
+    exif_xy_2180: Optional[tuple[float, float]] = None   # XY z EXIF zdjecia startowego
+    image_alt_exif: Optional[float] = None               # wysokosc EXIF zdjecia startowego
+
+
+def resolve_start(za: ZAnchorConfig, photos_dir: Path, frame: EnuFrame) -> StartPoint:
+    from .exif import read_gps
+    st = za.start
+    gps = read_gps(photos_dir / st.image) if st.image else None
+    exif_xy = tuple(map(float, frame.lonlat_to_puwg92(gps.lon, gps.lat))) if gps else None
+    if st.latlon:
+        lat, lon = map(float, st.latlon)
+        src = "latlon"
+    elif gps is not None:
+        lat, lon, src = gps.lat, gps.lon, f"exif:{st.image}"
+    else:
+        raise ValueError("z_anchor.mode=start_point wymaga z_anchor.start.latlon "
+                         "albo z_anchor.start.image (zdjecie w miejscu startu)")
+    x, y = frame.lonlat_to_puwg92(lon, lat)
+    return StartPoint(lat, lon, float(x), float(y), src, exif_xy,
+                      None if gps is None or gps.alt is None else float(gps.alt))
+
+
+def exif_to_odm_heights(rec: OdmReconstruction, frame: EnuFrame, photos_dir: Path,
+                        exclude: set[str] = frozenset()) -> dict[str, tuple[float, float]]:
+    """{zdjecie: (alt_EXIF, h_ODM)} dla zarejestrowanych kamer z wysokoscia w EXIF."""
+    from .exif import read_gps
+    out = {}
+    for name in rec.image_names:
+        if name in exclude or not (photos_dir / name).exists():
+            continue
+        gps = read_gps(photos_dir / name)
+        if gps.alt is None:
+            continue
+        _, eo = rec.camera(name)
+        h = float(frame.enu_to_geodetic(*eo.C_enu)[2])
+        out[name] = (float(gps.alt), h)
+    return out
+
+
+def start_point(za: ZAnchorConfig, rec: OdmReconstruction, dem: DemSampler, frame: EnuFrame,
+                photos_dir: Path) -> ZCalibration:
+    """z_offset = NMT(start_xy) - z_grunt_ODM,  z_grunt_ODM = ground_alt_exif_m + mediana(h_ODM - alt_EXIF).
+
+    Zalozenia:
+    - wysokosc EXIF (GPS Altitude) Potensica jest wysokoscia barometryczna wzgledem startu:
+      barometr jest zerowany przy starcie na ziemi, wiec grunt w punkcie startu ma wysokosc
+      EXIF ground_alt_exif_m = 0; nie jest to wysokosc npm;
+    - ODM georeferuje rekonstrukcje po pozycjach GPS z EXIF, wlacznie z tymi wysokosciami,
+      wiec h_ODM kamery = alt_EXIF + c, gdzie c jest stala (w granicach szumu barometru
+      i dopasowania SfM). c szacujemy mediana (h_ODM - alt_EXIF) po zarejestrowanych
+      kamerach; MAD i zakres tej roznicy pokazuja dryf barometru i jakosc dopasowania ODM;
+    - grunt w punkcie startu w ukladzie ODM: ground_alt_exif_m + c, w npm: NMT(start_xy).
+    Zdjecie startowe (start.image) nie bierze udzialu w rekonstrukcji; jego wysokosc EXIF to
+    wysokosc tej klatki nad gruntem i sluzy tylko do kontroli barometru (vs image_height_m).
+    Konwencja jak w pozostalych trybach: H [m npm] = h_ODM + z_offset."""
+    st = resolve_start(za, photos_dir, frame)
+    pairs = exif_to_odm_heights(rec, frame, photos_dir, {za.start.image} if za.start.image else set())
+    if len(pairs) < 3:
+        raise ValueError(f"start_point: za malo zarejestrowanych kamer z wysokoscia EXIF ({len(pairs)})")
+    d = np.array([h - a for a, h in pairs.values()])
+    med = float(np.median(d))
+    mad = float(np.median(np.abs(d - med)))
+    z_ground = za.start.ground_alt_exif_m + med
+    nmt = dem.sample(st.x_2180, st.y_2180)
+    if nmt is None:
+        raise ValueError(f"DEM nie zwrocil wysokosci w punkcie startu "
+                         f"(x={st.x_2180:.1f}, y={st.y_2180:.1f} EPSG:2180)")
+    offset = nmt - z_ground
+    stats = {"start_xy_source": st.xy_source, "start_x_2180": st.x_2180, "start_y_2180": st.y_2180,
+             "ground_alt_exif_m": za.start.ground_alt_exif_m,
+             "median_hodm_minus_exif": med, "mad_hodm_minus_exif": mad,
+             "min_hodm_minus_exif": float(d.min()), "max_hodm_minus_exif": float(d.max()),
+             "n_cameras": len(pairs), "z_ground_odm": z_ground, "nmt_start": nmt,
+             "per_camera": {k: {"alt_exif": a, "h_odm": h, "diff": h - a} for k, (a, h) in pairs.items()}}
+    # diagnostyka skali: h_ODM = k * alt_EXIF + b. Przy poprawnej skali rekonstrukcji k ~ 1 i stala
+    # roznica (mediana) jest wlasciwym modelem; k != 1 oznacza blad skali ODM (georeferencja tylko
+    # z GPS na krotkiej bazie) i wtedy grunt (alt = ground_alt_exif_m) lepiej przybliza regresja.
+    alts = np.array([a for a, _ in pairs.values()])
+    hs = np.array([h for _, h in pairs.values()])
+    if np.ptp(alts) > 1.0:
+        k, b = np.polyfit(alts, hs, 1)
+        z_lin = float(k * za.start.ground_alt_exif_m + b)
+        stats.update({"scale_k": float(k), "scale_b": float(b),
+                      "scale_r": float(np.corrcoef(alts, hs)[0, 1]),
+                      "z_ground_odm_linear": z_lin, "offset_linear": nmt - z_lin})
+    if st.image_alt_exif is not None:
+        stats["start_image_alt_exif"] = st.image_alt_exif
+        # porownanie: gdyby odczyt zdjecia startowego byl wysokoscia gruntu
+        stats["offset_if_ground_at_image_alt"] = offset - (st.image_alt_exif - za.start.ground_alt_exif_m)
+        if za.start.image_height_m is not None:
+            stats["start_image_height_declared_m"] = za.start.image_height_m
+            stats["baro_check_m"] = st.image_alt_exif - za.start.ground_alt_exif_m - za.start.image_height_m
+    if st.exif_xy_2180 is not None:
+        nmt_exif = dem.sample(*st.exif_xy_2180)
+        stats.update({"exif_start_x_2180": st.exif_xy_2180[0], "exif_start_y_2180": st.exif_xy_2180[1],
+                      "start_xy_exif_vs_used_m": math.hypot(st.exif_xy_2180[0] - st.x_2180,
+                                                           st.exif_xy_2180[1] - st.y_2180),
+                      "nmt_start_exif_xy": nmt_exif,
+                      "nmt_exif_minus_used": (nmt_exif - nmt) if nmt_exif is not None else None})
+    log.info("Z (start_point): start %s (%.2f, %.2f), NMT=%.2f - z_grunt_ODM=%.2f "
+             "(EXIF gruntu %.2f + mediana %.3f, MAD %.3f, n=%d) -> z_offset=%.2f m",
+             st.xy_source, st.x_2180, st.y_2180, nmt, z_ground, za.start.ground_alt_exif_m,
+             med, mad, len(pairs), offset)
+    return ZCalibration(offset, "start_point", stats=stats)
 
 
 # ───────────── tryb 3: dopasowanie DEM ODM do NMT ─────────────
@@ -304,6 +422,8 @@ def calibrate_z(config: PipelineConfig, dem: DemSampler, rec: OdmReconstruction,
         return ground_frame(rec, za.image, dem, frame, za.lens_height_m)
     if za.mode == "dem_alignment":
         return dem_alignment(za, config.odm_dtm_path, config.odm_dsm_path, dem, rec, frame)
+    if za.mode == "start_point":
+        return start_point(za, rec, dem, frame, config.photos_dir)
     if za.mode == "fixed":
         if za.offset_m is None:
             raise ValueError("z_anchor.mode=fixed wymaga z_anchor.offset_m")

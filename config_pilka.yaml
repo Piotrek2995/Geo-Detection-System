@@ -1,0 +1,96 @@
+# Eksperyment walidacyjny "pilka na dachu" (docs/eksperyment_pilka.md, experiments/pilka.yaml).
+# Osobny lot (15.11.2026, ok. 90 m od lotu glownego). Glowny config.yaml pozostaje bez zmian;
+# sekcje nieopisane tutaj maja wartosci domyslne z geodetect/config.py.
+
+photos_dir: zdjecia_pilka
+odm_dir: odm_pilka            # scripts/prepare_odm.py --config config_pilka.yaml
+model_path: models/yolo26l.pt # COCO
+output_dir: output
+
+images: null                  # null = wszystkie zarejestrowane zdjecia
+
+dem:
+  source: gugik
+  gugik_url: https://services.gugik.gov.pl/nmt/
+  timeout_s: 10.0
+  cache_path: output/cache/gugik_nmt.json
+
+detect:
+  source: model               # model | manual (punkty z manual_csv) | csv (detections_csv)
+  # Model COCO prawie nie rozpoznaje pilki z gory: przy conf 0.1 zero detekcji na 19 zdjeciach,
+  # najlepszy kandydat "sports ball" ma conf 0.005-0.04, ale (bez kafli) zawsze lezy na
+  # pilce (10/10 zdjec, weryfikacja wizualna). Stad: bardzo niski prog i jedna detekcja
+  # na zdjecie (top_k_per_class 1). Kafle 640: najlepszy kandydat w 8/16 przypadkow to nie pilka.
+  conf: 0.005
+  conf_per_class: {}
+  classes: [sports ball]      # COCO ID 32 — wybor po nazwie
+  display_names:
+    sports ball: piłka
+  colors:
+    sports ball: "#eb6834"
+  iou: 0.7
+  imgsz: 1280                 # pilka ma kilkadziesiat px; model trenowany na 640
+  device: auto
+  half: false
+  max_det: 300               # YOLO26: max_det dziala przed filtrem klas
+  top_k_per_class: 1         # najlepszy kandydat "sports ball" na zdjecie
+  batch: 8
+  tiling:
+    enabled: false
+    tile_size: 640
+    overlap: 0.2
+    include_full: true
+  manual_csv: data/pilka_pixels.csv     # punkty reczne (scripts/pilka_click.py)
+  detections_csv: data/pilka_detections_best.csv   # source=csv: najlepszy detektor z
+                                                   # scripts/pilka_detectors.py (YOLOE, prompt wizualny)
+  manual_class: sports ball
+  manual_box_px: 6.0
+
+raycast:
+  step_m: 1.0                 # niski lot (11-25 m): krotkie promienie
+  raster_step_factor: 1.0
+  t_min_m: 0.5
+  t_max_m: 200.0
+  bisect_iters: 25
+  chunk: 64
+  rest_chunk: 8
+
+surface:
+  source: nmt_local
+  nmt_dir: data/nmt
+  nmpt_dir: data/nmpt
+  odm_dsm: null               # null = odm_pilka/odm_dem/dsm.tif
+  interpolation: bilinear
+  default_crs: EPSG:2180
+  area_buffer_m: 120.0
+
+point:
+  method: bbox_center         # pilka mala i kulista; srodek ~0.11 m nad dachem (pomijalne)
+  per_class: {}
+
+filters:
+  border_margin_px: 2.0
+  exclude_border: false
+
+aggregate:
+  eps_m: 3.0
+  min_samples: 1
+  min_views: 2
+  weights: equal
+
+z_anchor:
+  mode: start_point
+  start:
+    image: SING0380.JPG       # zdjecie ok. 1 m nad punktem startu: TYLKO lokalizacja startu
+                              # i kontrola barometru; wykluczone z ODM i z przetwarzania
+    latlon: [53.823893, 21.435197]   # srednia z 5 pomiarow GPS telefonu
+    ground_alt_exif_m: 0.0    # barometr zerowany przy starcie na ziemi -> grunt = EXIF 0
+    image_height_m: 1.0       # deklarowana wysokosc zdjecia startowego nad gruntem (EXIF 1.4)
+  # dem_alignment (wariant porownawczy)
+  odm_dtm: null
+  odm_dsm: null
+  n_samples: 300
+  buffer_m: 3.0
+  max_dsm_dtm_m: 0.3
+  apply_tilt: false
+  seed: 0

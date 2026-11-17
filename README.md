@@ -168,6 +168,14 @@ a `z_offset` wyznacza się według `z_anchor.mode`:
 | `agl_assumption` | `NMT(mediana xy kamer) + agl_m − średnia h kamer` | fallback, wymaga zgadnięcia wysokości lotu |
 | `ground_frame` | `NMT(xy anchora) + lens_height_m − h anchora` | gdy pierwsze zdjęcie zrobiono **na ziemi w punkcie startu** (`z_anchor.image`) |
 | `dem_alignment` | `mediana(NMT − DEM_ODM)` w ok. 300 punktach otwartego terenu (DSM−DTM < 0,5 m) | **zalecany**, wymaga `odm_dem/dtm.tif` / `dsm.tif` (ODM z `--dtm --dsm`, patrz [ODM.md](ODM.md)) |
+| `start_point` | `NMT(start) − (ground_alt_exif_m + mediana(h_ODM − alt_EXIF))` | znany punkt startu (`z_anchor.start.latlon`, np. średnia GPS telefonu); barometr zerowany na ziemi → grunt = EXIF 0 |
+
+W trybie `start_point` zdjęcie `z_anchor.start.image` (zrobione nad punktem startu) służy tylko do
+lokalizacji startu i kontroli barometru. Jest automatycznie wykluczane z ODM
+(`python scripts/prepare_odm.py --config <cfg>` kopiuje zdjęcia bez niego) i z przetwarzania.
+Raport zawiera też diagnostykę skali: regresję `h_ODM = k · alt_EXIF + b`. Wartość k ≠ 1 oznacza
+błąd skali rekonstrukcji, przy którym stała różnica nie wystarcza
+(patrz [docs/eksperyment_pilka.md](docs/eksperyment_pilka.md)).
 
 `dem_alignment` dopasowuje też płaszczyznę `a·E + b·N + c` do różnic i raportuje jej nachylenie
 oraz azymut. Przechył oznacza błąd orientacji modelu ODM; korekta płaszczyzną jest
@@ -186,6 +194,13 @@ Eksperyment `zcal` zawiera też wariant z **diagnostyką `multiview_check`**: **
 jako niezależna kontrola, a nie do kalibracji wyników, bo ten sam rozrzut jest potem
 miarą jakości. Optimum jest zaniżone o wysokość punktu reprezentatywnego nad gruntem
 (środek bboxa).
+
+### Eksperyment walidacyjny „piłka na dachu”
+
+Osobny lot i osobny config (`config_pilka.yaml`, `experiments/pilka.yaml`); opis i wyniki
+w [docs/eksperyment_pilka.md](docs/eksperyment_pilka.md). Źródło pikseli `detect.source`:
+`model` (YOLO), `manual` (punkty z `manual_csv`, narzędzie `scripts/pilka_click.py`) albo `csv`
+(zapisane detekcje innego detektora, np. YOLOE z `scripts/pilka_detectors.py`).
 
 ### Źródła powierzchni ray castingu (`surface`)
 

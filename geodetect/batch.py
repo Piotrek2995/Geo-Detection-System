@@ -95,24 +95,29 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
         ctx = build_context(cfg)
     in_rec = set(ctx.reconstruction.image_names)
     skipped: dict[str, str] = {}
+    excluded = cfg.excluded_images()
+    for name in sorted(excluded):
+        skipped[name] = "zdjecie startowe z ziemi (z_anchor.start.image) — tylko lokalizacja startu"
 
     if images is None:
         candidates = ctx.reconstruction.image_names
         on_disk = sorted(p.name for p in cfg.photos_dir.iterdir()
                          if p.suffix.lower() in PHOTO_SUFFIXES) if cfg.photos_dir.is_dir() else []
         for name in on_disk:
-            if name not in in_rec:
+            if name not in in_rec and name not in excluded:
                 skipped[name] = "brak w rekonstrukcji ODM"
     else:
         candidates = []
         for name in images:
+            if name in excluded:
+                continue
             if name not in in_rec:
                 skipped[name] = "brak w rekonstrukcji ODM"
             else:
                 candidates.append(name)
 
     todo = []
-    for name in candidates:
+    for name in [c for c in candidates if c not in excluded]:
         if not (cfg.photos_dir / name).exists():
             skipped[name] = f"brak pliku w {cfg.photos_dir}"
         else:

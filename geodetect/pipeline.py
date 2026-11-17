@@ -14,7 +14,7 @@ import numpy as np
 
 from .config import FilterConfig, PipelineConfig
 from .dem import DemSampler, resolve_dem
-from .detect import Detection, Detector, validate_class_names
+from .detect import Detection, Detector, make_detector, validate_class_names
 from .exif import GpsFix, read_gps
 from .geo import EnuFrame
 from .odm import CameraEO, CameraIO, OdmReconstruction
@@ -114,7 +114,7 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     log.info("Powierzchnia ray castingu: %s (uklad wysokosci %s, krok %.2f m)", surface.name,
              surface.vertical, config.raycast.step_for(surface.resolution_m))
     if detector is None:
-        detector = Detector(config.model_path, config.detect)
+        detector = make_detector(config.model_path, config.detect)
     names = getattr(detector, "names", None)
     if names:   # nazwy klas z konfiguracji musza istniec w modelu
         validate_class_names(config.point.per_class, names.values(), "point.per_class")

@@ -35,7 +35,7 @@ import numpy as np
 from .aggregate import AggregatedObject, aggregate
 from .batch import BatchResult, run_batch
 from .config import _PATH_FIELDS, PipelineConfig, _to_plain
-from .detect import Detection, Detector
+from .detect import Detection, Detector, make_detector
 from .diagnostics import ZScan, fit_along_vs_tan, multiview_z_scan, ray_residuals
 
 log = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 ALIASES = {"detect.model": "model_path", "model": "model_path"}
 EXPERIMENT_KEYS = {"name", "description", "base_config", "overrides", "axes", "variants",
-                   "reference", "metrics", "images"}
+                   "reference", "metrics", "images", "exclude"}
 
 
 # ───────────── definicja eksperymentu ─────────────
@@ -61,6 +61,7 @@ class MetricsSpec:
     tree_profile: Optional[dict] = None  # {cover_threshold_m, step_m, n_plots}
     point_previews: int = 0              # podglady metod punktu (maski SAM)
     dem_alignment_plot: bool = False
+    reference_point: Optional[dict] = None   # walidacja wzgledem punktu GT (geodetect.validation)
 
 
 @dataclass
@@ -102,15 +103,21 @@ def _short(v: Any) -> str:
     return s
 
 
-def expand_variants(axes: Optional[dict], variants: Optional[list]) -> list[Variant]:
-    """Warianty z osi (iloczyn kartezjanski) i/lub jawnej listy."""
+def expand_variants(axes: Optional[dict], variants: Optional[list],
+                    exclude: Optional[list] = None) -> list[Variant]:
+    """Warianty z osi (iloczyn kartezjanski) i/lub jawnej listy. `exclude`: lista slownikow
+    {pole: wartosc}; kombinacja z osi pasujaca do WSZYSTKICH par ktoregos z nich jest pomijana
+    (np. odm_dsm x dem_alignment, gdy z_offset nie wplywa na wynik)."""
     out: list[Variant] = []
     if axes:
         keys = list(axes)
         for combo in itertools.product(*(axes[k] if isinstance(axes[k], list) else [axes[k]]
                                          for k in keys)):
+            ov = dict(zip(keys, combo))
+            if any(all(k in ov and ov[k] == v for k, v in ex.items()) for ex in exclude or []):
+                continue
             name = " | ".join(_short(v) for v in combo)
-            out.append(Variant(name, dict(zip(keys, combo))))
+            out.append(Variant(name, ov))
     for i, v in enumerate(variants or []):
         if not isinstance(v, dict):
             raise ValueError(f"Wariant #{i}: oczekiwano slownika {{name, set, derive}}")
@@ -147,7 +154,7 @@ def load_experiment(path: Path | str) -> Experiment:
         raise ValueError(f"{path.name}: nieznane metryki {sorted(set(m) - known)}")
     exp = Experiment(str(data["name"]), path, base, str(data.get("description", "")).strip(),
                      dict(data.get("overrides") or {}),
-                     expand_variants(data.get("axes"), data.get("variants")),
+                     expand_variants(data.get("axes"), data.get("variants"), data.get("exclude")),
                      data.get("reference"), MetricsSpec(**m), data.get("images"))
     if exp.reference and exp.reference not in [v.name for v in exp.variants]:
         raise ValueError(f"{path.name}: reference={exp.reference!r} nie jest nazwa wariantu "
@@ -215,7 +222,7 @@ class DetectionStore:
     """Detektory (model ladowany raz na klucz) i ich wyniki per zdjecie."""
 
     def __init__(self, factory=None):
-        self.factory = factory or (lambda cfg: Detector(cfg.model_path, cfg.detect))
+        self.factory = factory or (lambda cfg: make_detector(cfg.model_path, cfg.detect))
         self.detectors: dict[str, Any] = {}
         self.results: dict[str, dict[str, list[Detection]]] = {}
         self.time_s: dict[str, float] = {}
@@ -452,6 +459,7 @@ class ExperimentRunner:
         self._gt: dict[str, Any] = {}
         self.results: dict[str, VariantResult] = {}
         self.tree: Optional[dict] = None
+        self.validation = None
 
     # -- wspoldzielone zasoby --
     def dem(self, cfg):
@@ -523,6 +531,9 @@ class ExperimentRunner:
             self._metrics(self.results[v.name])
         if self.exp.metrics.tree_profile is not None:
             self.tree = self._tree_profile()
+        if self.exp.metrics.reference_point:
+            from .validation import build_report
+            self.validation = build_report(self)
         self._write()
         return self.out
 
@@ -732,6 +743,9 @@ class ExperimentRunner:
             self._tree_plots(plots)
         if spec.point_previews:
             self._point_previews(spec.point_previews)
+        if self.validation is not None:
+            from .validation import write_outputs
+            write_outputs(self.validation, self, self.out)
         self._write_csv()
         (self.out / "summary.md").write_text(self._summary_md(plots, meta), encoding="utf-8")
 
@@ -976,6 +990,10 @@ class ExperimentRunner:
 
         if self.tree is not None:
             L += self._tree_md()
+
+        if self.validation is not None:
+            from .validation import summary_md
+            L += summary_md(self.validation, self)
 
         L += ["## Pliki", "", "- `summary.csv` — jeden wiersz na wariant (wszystkie metryki)",
               "- `static_objects.csv` — obiekty statyczne per wariant",

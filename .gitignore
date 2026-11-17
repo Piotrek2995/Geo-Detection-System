@@ -10,8 +10,10 @@ detections.*
 detections_map.html
 nmt/
 odm_project/
+odm_pilka/
 data/
 # modele: w repo LudzieiNamioty.pt i MODEL5.pt (domyslny); pozostale wagi pobierane / lokalne
 *.pt
 !models/LudzieiNamioty.pt
 !models/MODEL5.pt
+mobileclip*.ts

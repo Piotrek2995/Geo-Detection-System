@@ -62,7 +62,19 @@ class DetectConfig:
     half: bool = False
     max_det: int = 300
     batch: int = 8                  # obrazy/kafle na jedno wywolanie modelu
+    top_k_per_class: Optional[int] = None   # po filtrze klas: zostaw k najpewniejszych na
+                                            # zdjecie (max_det dziala przed filtrem klas)
     tiling: TilingConfig = field(default_factory=TilingConfig)
+    # Zrodlo detekcji: "model" (YOLO) albo "manual" — punkty wskazane recznie w CSV
+    # (image,u,v,visible), np. punkt odniesienia w eksperymencie walidacyjnym. Punkt manualny
+    # staje sie detekcja klasy manual_class z bboxem manual_box_px wokol (u, v).
+    # "csv" — zapisane detekcje innego detektora (detections_csv: image,u,v,visible,conf,x1..y2),
+    # np. detektor otwartego slownika spoza pipeline'u (scripts/pilka_detectors.py).
+    source: str = "model"
+    manual_csv: Optional[Path] = None
+    detections_csv: Optional[Path] = None
+    manual_class: str = "manual"
+    manual_box_px: float = 6.0
 
     def class_list(self) -> Optional[list[str]]:
         """None = wszystkie klasy."""
@@ -183,7 +195,31 @@ class AggregateConfig:
     min_views: int = 2          # obiekt z >= min_views widokami -> confirmed, inaczej single_view
 
 
-Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment", "fixed")
+Z_ANCHOR_MODES = ("agl_assumption", "ground_frame", "dem_alignment", "fixed", "start_point")
+
+
+@dataclass
+class StartConfig:
+    """Punkt startu drona (tryb z_anchor.mode=start_point).
+
+    Barometr Potensica jest zerowany przy starcie na ziemi, wiec grunt w punkcie startu ma
+    wysokosc EXIF ground_alt_exif_m (domyslnie 0).
+
+    image:  zdjecie zrobione w miejscu startu tuz nad ziemia (np. dron trzymany ok. 1 m nad
+            punktem startu). Sluzy wylacznie do lokalizacji startu (XY z EXIF) i do kontroli
+            barometru; jest automatycznie wykluczane z rekonstrukcji ODM
+            (scripts/prepare_odm.py) i z przetwarzania. Jego wysokosc EXIF to wysokosc TEJ
+            klatki nad gruntem, nie wysokosc gruntu.
+    latlon: [lat, lon] WGS84 startu zmierzone niezaleznie (np. srednia GPS telefonu);
+            ma priorytet przed XY z EXIF zdjecia `image`.
+    ground_alt_exif_m: wysokosc EXIF odpowiadajaca gruntowi w punkcie startu (0 = barometr
+            zerowany na ziemi).
+    image_height_m: deklarowana wysokosc zdjecia startowego nad gruntem (np. 1.0); roznica
+            wzgledem jego wysokosci EXIF jest orientacyjna precyzja barometru (raport)."""
+    image: Optional[str] = None
+    latlon: Optional[list[float]] = None
+    ground_alt_exif_m: float = 0.0
+    image_height_m: Optional[float] = None
 
 
 @dataclass
@@ -199,6 +235,9 @@ class ZAnchorConfig:
                        z_offset = mediana(NMT - DEM_ODM) w punktach otwartego terenu.
       fixed          — z_offset = offset_m podany wprost (np. wynik zewnetrznego pomiaru
                        albo diagnostyki multiview_check w eksperymentach).
+      start_point    — punkt startu (`start`): z_offset = NMT(start_xy) - z_grunt_ODM,
+                       gdzie z_grunt_ODM = ground_alt_exif_m (0) + mediana
+                       (h_ODM_kamery - alt_EXIF_kamery) po zarejestrowanych kamerach.
     Diagnostyka multiview_check (geodetect.zcal.multiview_z_scan) nie jest trybem kalibracji.
     """
     mode: str = "agl_assumption"
@@ -217,6 +256,8 @@ class ZAnchorConfig:
     # fixed
     offset_m: Optional[float] = None
     fixed_label: str = "podany w configu"
+    # start_point
+    start: StartConfig = field(default_factory=StartConfig)
 
 
 @dataclass
@@ -300,6 +341,10 @@ class PipelineConfig:
     def to_dict(self) -> dict[str, Any]:
         return _to_plain(self)
 
+    def excluded_images(self) -> set[str]:
+        """Zdjecia wylaczone z rekonstrukcji i przetwarzania (zdjecie startowe z ziemi)."""
+        return {self.z_anchor.start.image} if self.z_anchor.start.image else set()
+
     def _resolve_paths(self, base: Path) -> None:
         def res(p: Optional[Path]) -> Optional[Path]:
             if p is None or p.is_absolute():
@@ -319,14 +364,18 @@ class PipelineConfig:
         self.point.mask_cache_dir = res(self.point.mask_cache_dir)
         self.point.sam_model = res(self.point.sam_model)
         self.eval.labels_dir = res(self.eval.labels_dir)
+        self.detect.manual_csv = res(self.detect.manual_csv)
+        self.detect.detections_csv = res(self.detect.detections_csv)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
-                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir", "labels_dir"}
+                "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir", "labels_dir",
+                "manual_csv", "detections_csv"}
 _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
-           "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig}
+           "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig,
+           "start": StartConfig}
 
 
 def _build(cls, data: dict[str, Any]):
