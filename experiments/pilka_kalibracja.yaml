@@ -1,0 +1,118 @@
+# Zadanie 3c: rekonstrukcja z ustalona kalibracja kamery (odm_pilka_fixcal) vs samokalibracja
+# (odm_pilka) na locie "pilka". Przygotowanie: ODM z --cameras (kalibracja z lotu "namiot")
+# --use-fixed-camera-params, potem scripts/transfer_ortho_points.py.
+# Uruchomienie: python scripts/run_experiment.py experiments/pilka_kalibracja.yaml
+name: pilka_kalibracja
+description: >
+  Lot "pilka" (19 zdjec), piksele reczne. Dwie rekonstrukcje ODM z tych samych zdjec: "stara"
+  (samokalibracja, f = 0.374) i "fixcal" (kalibracja z lotu "namiot" ustalona, f = 0.528).
+  Dla kazdej: gps_only + start_point / dem_alignment oraz wyrownanie 7p do NMPT z priorem
+  barometrycznym i bez, na NMPT i DSM ODM; NMT tylko dla fixcal (hipoteza H1). Dla DSM ODM
+  z_offset nie wplywa na polozenie poziome trafienia, wiec DSM x dem_alignment pominiety.
+base_config: ../config_pilka.yaml
+overrides:
+  aggregate.eps_m: 3.0
+  detect.source: manual
+variants:
+  - {name: "stara | NMPT | start_point", set: {odm_dir: odm_pilka, surface.source: nmpt_local, z_anchor.mode: start_point}}
+  - {name: "stara | NMPT | dem_alignment", set: {odm_dir: odm_pilka, surface.source: nmpt_local, z_anchor.mode: dem_alignment}}
+  - {name: "stara | NMPT | 7p", set: {odm_dir: odm_pilka, surface.source: nmpt_local, georef.mode: similarity_nmpt}}
+  - {name: "stara | NMPT | 7p bez baro", set: {odm_dir: odm_pilka, surface.source: nmpt_local, georef.mode: similarity_nmpt, georef.use_baro_prior: false}}
+  - {name: "stara | DSM | start_point", set: {odm_dir: odm_pilka, surface.source: odm_dsm, z_anchor.mode: start_point}}
+  - {name: "stara | DSM | 7p", set: {odm_dir: odm_pilka, surface.source: odm_dsm, georef.mode: similarity_nmpt}}
+  - {name: "stara | DSM | 7p bez baro", set: {odm_dir: odm_pilka, surface.source: odm_dsm, georef.mode: similarity_nmpt, georef.use_baro_prior: false}}
+  - {name: "fixcal | NMPT | start_point", set: {odm_dir: odm_pilka_fixcal, surface.source: nmpt_local, z_anchor.mode: start_point}}
+  - {name: "fixcal | NMPT | dem_alignment", set: {odm_dir: odm_pilka_fixcal, surface.source: nmpt_local, z_anchor.mode: dem_alignment}}
+  - {name: "fixcal | NMPT | 7p", set: {odm_dir: odm_pilka_fixcal, surface.source: nmpt_local, georef.mode: similarity_nmpt}}
+  - {name: "fixcal | NMPT | 7p bez baro", set: {odm_dir: odm_pilka_fixcal, surface.source: nmpt_local, georef.mode: similarity_nmpt, georef.use_baro_prior: false}}
+  - {name: "fixcal | DSM | start_point", set: {odm_dir: odm_pilka_fixcal, surface.source: odm_dsm, z_anchor.mode: start_point}}
+  - {name: "fixcal | DSM | 7p", set: {odm_dir: odm_pilka_fixcal, surface.source: odm_dsm, georef.mode: similarity_nmpt}}
+  - {name: "fixcal | DSM | 7p bez baro", set: {odm_dir: odm_pilka_fixcal, surface.source: odm_dsm, georef.mode: similarity_nmpt, georef.use_baro_prior: false}}
+  - {name: "fixcal | NMT | start_point", set: {odm_dir: odm_pilka_fixcal, surface.source: nmt_local, z_anchor.mode: start_point}}
+  - {name: "fixcal | NMT | dem_alignment", set: {odm_dir: odm_pilka_fixcal, surface.source: nmt_local, z_anchor.mode: dem_alignment}}
+reference: "stara | NMPT | start_point"
+metrics:
+  static_classes: [sports ball]
+  moving_classes: []
+  min_views_static: 2
+  min_views_scan: 3
+  reference_point:
+    latlon: [53.823837121662634, 21.435315268494285]
+    cls: sports ball
+    object_height_m: 0.11
+    profiles: 3
+    preview_h: null           # H pilki do rzutu na zdjecia w pilka_detect.py --project-gt (null: NMPT)
+    reference_json: output/pilka/reference/reference.json
+    ortho_pairs_csv: data/pilka_ortho_pairs.csv    # scripts/pilka_click.py --ortho (GT_transfer)
+    base_odm_dir: odm_pilka
+    # punkty dachu i pilka na ortofotomapie kazdej rekonstrukcji (fixcal: przeniesione z odm_pilka
+    # dopasowaniem SIFT ortofotomap — scripts/transfer_ortho_points.py)
+    ortho_pairs_by_rec:
+      odm_pilka: data/pilka_ortho_pairs.csv
+      odm_pilka_fixcal: data/pilka_ortho_pairs_fixcal.csv
+    # Trzy warianty GT (applies_to): "GT pilki" = odczyt z Google Maps; "GT pilki skorygowany" =
+    # ten odczyt minus przesuniecie dachu zmierzone na ortofotomapie GUGiK; "GT_transfer" = pilka
+    # z ortofotomapy ODM przeniesiona na GUGiK Helmertem z punktow dachu, minus przesuniecie dachu.
+    uncertainty:
+      - component: georeferencja zdjecia satelitarnego Google Maps
+        applies_to: GT pilki
+        sigma_m: 1.5
+        note: >-
+          GT wskazany na Google Maps (pilki nie ma na zadnym zdjeciu; wskazane miejsce na dachu);
+          bezwzgledna dokladnosc zobrazowan Google na terenach wiejskich typowo 1-3 m
+      - component: przesuniecie dachu wzgledem podstawy na zdjeciu Google (nieznane)
+        applies_to: GT pilki
+        sigma_m: 1.4
+        note: >-
+          wielkosc jak zmierzona na ortofotomapie GUGiK (1.4 m); kierunek na zdjeciu Google nieznany
+      - component: precyzja wskazania miejsca na dachu
+        applies_to: GT pilki
+        sigma_m: 0.3
+        note: pilka niewidoczna na zdjeciu Google; wskazanie wzgledem elementow dachu
+      - component: GT Google (jak wyzej, laczna)
+        applies_to: GT pilki skorygowany
+        sigma_m: 1.5
+        note: >-
+          korekta o lean zmierzony na ortofotomapie GUGiK zaklada, ze zdjecie Google ma ten sam
+          lean — nie musi; korekta ma charakter porownawczy
+      - component: wyznaczenie przesuniecia dachu (dopasowanie obrysu EGiB do dachu)
+        applies_to: GT pilki skorygowany
+        sigma_m: 0.3
+        note: roznica oszacowan budynek z GT / wszystkie budynki w kadrze
+      - component: polozenie obrysu budynku EGiB
+        applies_to: GT_transfer
+        sigma_m: 0.3
+        note: >-
+          lean mierzony wzgledem obrysu EGiB; blad obrysu przenosi sie wprost na korekte
+      - component: wyznaczenie przesuniecia dachu (dopasowanie obrysu EGiB do dachu)
+        applies_to: GT_transfer
+        sigma_m: 0.3
+        note: jak wyzej
+      - component: georeferencja ortofotomapy GUGiK
+        applies_to: GT_transfer
+        sigma_m: 0.2
+        note: >-
+          piksel 0.1 m; blad sredni polozenia NMT/NMPT z tego samego nalotu 0.09 m — przyjeto 0.2 m
+      - component: transformacja Helmerta ODM -> GUGiK (RMS reszt)
+        applies_to: GT_transfer
+        sigma_m: null
+        from: helmert_rms
+        note: >-
+          wskazania odpowiadajacych sobie punktow dachu na obu ortofotomapach; z 2 par brak
+          nadmiarowosci (RMS nieokreslony) — wtedy przyjac 0.2 m
+      - component: wskazanie pilki na ortofotomapie ODM
+        applies_to: GT_transfer
+        sigma_m: 0.05
+        note: piksel 0.05 m (podglad), pilka 0.22 m
+      - component: GPS telefonu (srednia z 5 pomiarow)
+        applies_to: start
+        sigma_m: 1.5
+        note: >-
+          typowy rozrzut GNSS smartfona 2-5 m, srednia z 5 skorelowanych pomiarow i kontrola
+          na zdjeciu; wplyw na z_offset przez NMT(start) — patrz roznica telefon/EXIF
+      - component: precyzja barometru (kontrola na zdjeciu startowym)
+        applies_to: z_offset start_point
+        sigma_m: 0.4
+        note: >-
+          zdjecie startowe EXIF 1.4 m przy deklarowanym ok. 1 m nad gruntem; dodatkowo MAD
+          roznicy h_ODM - alt_EXIF po kamerach (raport kalibracji)

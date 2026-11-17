@@ -203,13 +203,36 @@ class ReferenceReport:
     skipped: dict = field(default_factory=dict)
 
 
+_BASE_REC: dict = {}      # rekonstrukcja bazowa eksperymentu (bez sufiksu w etykietach)
+
+
 def _variant_axes(vr) -> dict:
     c = vr.cfg
     z = c.z_anchor.mode
     if c.georef.mode != "gps_only":
         z = "7p" + ("" if c.georef.use_baro_prior else " bez baro")
+    rec = Path(c.odm_dir).name
+    if rec != _BASE_REC.get("name", rec):
+        z = f"{z} [{rec}]"
     return {"surface": c.surface.source, "z_mode": z,
             "pixel": {"manual": "manual", "csv": "detekcja_best"}.get(c.detect.source, "detekcja")}
+
+
+def model_roof_height(cfg, frame, aln, ball_xy, radius_m: float = 12.0) -> float:
+    """Wysokosc dachu w modelu ODM w miejscu pilki: H(DSM w pilce) - 10. percentyl H DSM w promieniu
+    radius_m (grunt wokol budynku). Niezalezna od DTM ODM (pod dachem interpolowany, w fixcal
+    blednie sklasyfikowany) i od przesuniecia georeferencji; po 7p liczona w ukladzie wyrownanym."""
+    if not ball_xy or not Path(cfg.odm_dsm_path).exists():
+        return float("nan")
+    from .align import dsm_points_local, raster_h
+    P = dsm_points_local(Path(cfg.odm_dsm_path), frame, 0.2)
+    P = P[np.hypot(P[:, 0] - ball_xy[0], P[:, 1] - ball_xy[1]) <= radius_m]
+    top = np.array([[ball_xy[0], ball_xy[1], raster_h(cfg.odm_dsm_path, *ball_xy)]])
+    if aln is not None:
+        P, top = aln.result.sim.apply(P), aln.result.sim.apply(top)
+    if len(P) < 50 or not np.isfinite(top[0, 2]):
+        return float("nan")
+    return float(top[0, 2] - np.percentile(P[:, 2], 10))
 
 
 def build_report(runner) -> ReferenceReport:
@@ -260,20 +283,52 @@ def build_report(runner) -> ReferenceReport:
     rep.roof["roof_h_nmpt"] = rep.roof["nmpt"] - rep.roof["nmt"]
 
     base_gts = gts
+    pairs_by_rec = {k: (Path(v) if Path(v).is_absolute() else runner.exp.base_config.parent / v)
+                    for k, v in (spec.get("ortho_pairs_by_rec") or {}).items()}
+    lean_xy = ((le["dx_m"], le["dy_m"]) if le and not le.get("at_search_bound") else (0.0, 0.0))
+
+    def rec_pairs(vr):
+        """Punkty dachu i pilka na ortofotomapie TEJ rekonstrukcji (EPSG:2180) + GUGiK - lean."""
+        import csv as _csv
+        rec = Path(vr.cfg.odm_dir).name
+        f = pairs_by_rec.get(rec) or (tp if rec == _BASE_REC.get("name") else None)
+        if not f or not Path(f).exists():
+            return None, []
+        rows_ = list(_csv.DictReader(open(f, encoding="utf-8")))
+        ball = next(((float(r["odm_x"]), float(r["odm_y"])) for r in rows_ if r["kind"] == "pilka"), None)
+        roof = [((float(r["odm_x"]), float(r["odm_y"])),
+                 (float(r["gugik_x"]) - lean_xy[0], float(r["gugik_y"]) - lean_xy[1]))
+                for r in rows_ if r["kind"] == "punkt_dachu"]
+        return ball, roof
+
+    first = next(iter(runner.results.values()))
+    _BASE_REC.setdefault("name", Path(spec.get("base_odm_dir") or first.cfg.odm_dir).name)
     for name, vr in runner.results.items():
         ax = _variant_axes(vr)
         fr = vr.ctx.frame
-        al = getattr(vr.ctx, "alignment", None)
+        aln = getattr(vr.ctx, "alignment", None)
         gts = dict(base_gts)
-        if al is not None:
+        ball_rec, roof_rec = rec_pairs(vr)
+        gts["odm"] = ball_rec
+        roof_model = model_roof_height(vr.cfg, fr, aln, ball_rec, float(spec.get("roof_ground_radius_m", 12.0)))
+        roof_err = []
+        for (ox, oy), (gx_, gy_) in roof_rec:
+            q = aln.map_odm_point(ox, oy) if aln is not None else (ox, oy)
+            roof_err.append(math.hypot(q[0] - gx_, q[1] - gy_))
+        if aln is not None:
             # georef.mode=similarity_nmpt: model ODM (DSM/DTM, pilka na ortofotomapie ODM) w ukladzie
             # wyrownanym — odniesienie "odm" przeliczone ta sama transformacja 7p
-            dsm_gt = al.model_H(al.dsm_path, gx, gy)
-            dtm_gt = al.model_H(vr.cfg.odm_dtm_path, gx, gy) if Path(vr.cfg.odm_dtm_path).exists() else float("nan")
-            if base_gts["odm"]:
-                gts["odm"] = tuple(al.map_odm_point(*base_gts["odm"])[:2])
-        else:
+            dsm_gt = aln.model_H(aln.dsm_path, gx, gy)
+            dtm_gt = aln.model_H(vr.cfg.odm_dtm_path, gx, gy) if Path(vr.cfg.odm_dtm_path).exists() else float("nan")
+            if ball_rec:
+                gts["odm"] = tuple(aln.map_odm_point(*ball_rec)[:2])
+        elif Path(vr.cfg.odm_dir) == Path(ref_vr.cfg.odm_dir):
             dsm_gt, dtm_gt = sample(dsm, gx, gy, fr), sample(dtm, gx, gy, fr)
+        else:                      # inna rekonstrukcja niz wariant referencyjny
+            c_ = copy.deepcopy(vr.cfg)
+            c_.surface.source = "odm_dsm"
+            dsm_gt = sample(runner.surface(c_), gx, gy, fr)
+            dtm_gt = sample(odm_dtm_surface(vr.cfg, (gx - 200, gy - 200, gx + 200, gy + 200)), gx, gy, fr)
         cams = {r.image_name: r.camera for r in vr.batch.images}
         recs = []
         for gd in vr.batch.detections:
@@ -331,6 +386,15 @@ def build_report(runner) -> ReferenceReport:
             "err_transfer_median": (float(np.median([r["err_transfer_m"] for r in recs]))
                                     if recs else float("nan")),
             "obj_h": main.h if main else float("nan"),
+            "rec": Path(vr.cfg.odm_dir).name, "roof_ctrl": roof_err, "roof_model": roof_model,
+            "roof_ctrl_rms": _rms(roof_err) if roof_err else float("nan"),
+            "georef": vr.cfg.georef.mode + ("" if vr.cfg.georef.use_baro_prior else " bez baro"),
+            "align": (aln.result.sim.summary() | {"nmad_all": aln.result.residuals_after["all"].get("nmad"),
+                                                 "nmad_before": aln.result.residuals_before.get("nmad"),
+                                                 "baro_k": aln.result.priors.get("baro_scale_k")})
+                     if aln is not None else None,
+            "qc_k": (vr.ctx.qc.check("vertical_scale").value
+                     if getattr(vr.ctx, "qc", None) is not None and vr.ctx.qc.check("vertical_scale") else None),
             "n_objects": len(objs),
             "mean_err": math.hypot(allmean[0] - gx, allmean[1] - gy) if allmean else float("nan"),
             "dsm_gt": dsm_gt, "dtm_gt": dtm_gt})
@@ -503,7 +567,8 @@ def ray_profiles(rep: ReferenceReport, runner, out_dir: Path, n: int) -> list[Pa
     from .expplots import AQUA, BLUE, GREEN, INK, INK2, NEUTRAL, ORANGE, YELLOW, _fig, _plt, _save
     from .raycast import SurfaceProjector, pixel_to_ray, raycast
     pref = [v for v in runner.results.values()
-            if _variant_axes(v) == {"surface": "nmt_local", "z_mode": "start_point", "pixel": "manual"}]
+            if {k: _variant_axes(v)[k] for k in ("surface", "z_mode", "pixel")}
+            == {"surface": "nmt_local", "z_mode": "start_point", "pixel": "manual"}]
     pref = pref or [v for v in runner.results.values() if v.cfg.surface.source == "nmt_local"]
     if not pref:
         return []
@@ -692,6 +757,29 @@ def summary_md(rep: ReferenceReport, runner) -> list[str]:
     L += ["", "Kolumna „piłka na ortofotomapie ODM”: odniesienie w układzie rekonstrukcji ODM — mierzy spójność "
           "wewnętrzną (ray casting, powierzchnia, kalibracja Z), bez błędu georeferencji samej rekonstrukcji. "
           "Różnica względem GT_transfer to w przybliżeniu błąd georeferencji ODM w miejscu piłki."]
+    if any(v.get("roof_ctrl") for v in rep.variants) or any(v.get("align") for v in rep.variants):
+        L += ["", "### Rekonstrukcja, georeferencja i kontrole", "",
+              "Skala pionowa k: h_ODM kamer vs barometr (QC, przed wyrównaniem). Dach w modelu: H DSM ODM w miejscu "
+              "piłki (ortofotomapa tej rekonstrukcji) minus 10. percentyl H DSM w promieniu 12 m (grunt), po 7p "
+              "w układzie wyrównanym — bez 7p zawyżona przez pochylenie modelu. H modelu w GT Google − NMT: "
+              "porównanie z NMPT w tym samym punkcie (kalenica, " + _f(rep.roof.get("roof_h_nmpt")) + " m); "
+              "sensowne tylko, gdy georeferencja modelu trafia w budynek. Punkty dachu: odległość punktu z ortofotomapy "
+              "danej rekonstrukcji (po transformacji 7p, jeśli jest) od GUGiK − lean — kontrola niezależna od "
+              "wyrównania i od ray castingu.", "",
+              "| wariant | rekonstrukcja | georef | k (QC) | skala 7p | pochylenie 7p [°] | k baro po 7p | "
+              "NMAD DSM−NMPT przed / po [m] | H modelu w GT Google − NMT [m] | dach w miejscu piłki [m] | "
+              "RMS wielowidokowy [m] | błąd vs GT_transfer [m] | punkty dachu: RMS (max) [m] |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for v in rep.variants:
+            a_ = v.get("align") or {}
+            rc = v.get("roof_ctrl") or []
+            L.append(f"| {_vn(v['variant'])} | {v.get('rec', '')} | {v.get('georef', '')} | {_f(v.get('qc_k'), '{:.3f}')} | "
+                     f"{_f(a_.get('scale'), '{:.3f}')} | {_f(a_.get('tilt_deg'))} | {_f(a_.get('baro_k'), '{:.3f}')} | "
+                     f"{_f(a_.get('nmad_before'))} / {_f(a_.get('nmad_all'))} | {_f(v['dsm_gt'] - rep.roof['nmt'])} | "
+                     f"{_f(v.get('roof_model'))} | "
+                     f"{_f(v['obj_rms'])} | {_f(v['obj_err_transfer'])} | "
+                     + (f"{_f(v['roof_ctrl_rms'])} ({_f(max(rc))})" if rc else "–") + " |")
+        L.append("")
     L += ["", "### Błąd pozycji zagregowanej względem wariantów GT", "",
           "| wariant | GT Google Maps [m] | GT − lean [m] | GT_transfer [m] | mediana per zdjęcie vs GT_transfer [m] "
           "| piłka na ortofotomapie ODM [m] | mediana per zdjęcie vs ODM [m] |",

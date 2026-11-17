@@ -17,3 +17,4 @@ data/
 !models/LudzieiNamioty.pt
 !models/MODEL5.pt
 mobileclip*.ts
+odm_pilka_fixcal/

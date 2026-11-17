@@ -228,6 +228,38 @@ W układzie wyrównanym H = h, więc `z_offset` = 0 (zawiera go tz). DSM ODM jes
 EPSG:2180 / m n.p.m. Eksperymenty: `experiments/georef.yaml` (lot „namiot”) i warianty `7p`
 w `experiments/pilka.yaml`.
 
+### Kontrola jakości rekonstrukcji (`qc`)
+
+`geodetect/qc.py` działa w `build_context` na georeferencji `gps_only`. Wynik (OK / OSTRZEŻENIE /
+ZŁY + zalecenia) trafia do podsumowania batcha i do `summary.md` eksperymentów:
+
+| kontrola | miara | domyślne progi (ostrzeżenie / zły) |
+|---|---|---|
+| skala pionowa | nachylenie k regresji h_ODM kamer vs wysokość barometryczna EXIF | \|k − 1\| > 0,10 / 0,20 (i > 2σ / 3σ nachylenia) |
+| ogniskowa | f ODM vs `qc.camera_focal` (albo EXIF f35 — wtedy najwyżej ostrzeżenie) | 10 % / 25 % |
+| zgodność z NMPT | NMAD(DSM ODM − NMPT) | 0,5 / 1,5 m |
+| baza kamer | √2·σ_GPS / rozpiętość kamer (oczekiwany błąd orientacji) | 2° / 5° |
+
+Zalecenia QC:
+- „ustal kalibrację kamery”: przy złej skali pionowej lub ogniskowej, bo wtedy 7p tylko kompensuje deformację;
+- „rozważ 7p”: przy niezgodności z NMPT lub słabej bazie;
+- „GCP / większa baza”: przy bardzo słabej bazie.
+
+Domyślnie pozostaje `gps_only` + `dem_alignment`, a 7p jest opcją zalecaną przez QC.
+
+Rekonstrukcja z ustaloną kalibracją kamery (z lotu o dobrej geometrii):
+
+```powershell
+# cameras.json: wpis "cameras" z opensfm/reconstruction.topocentric.json lotu referencyjnego
+docker run --rm -v "${PWD}\odm_pilka_fixcal:/datasets/code" opendronemap/odm --project-path /datasets `
+  --cameras /datasets/code/cameras.json --use-fixed-camera-params --dtm --dsm --pc-classify --dem-resolution 2
+python scripts/transfer_ortho_points.py      # punkty z ortofotomapy starej rekonstrukcji -> nowa
+python scripts/run_experiment.py experiments/pilka_kalibracja.yaml
+```
+
+Uwaga: dla Potensic Atom LT EXIF (f35 = 13 mm → f/W 0,345) nie odpowiada geometrii obrazu
+2560 × 1440. Szczegóły w [docs/eksperyment_pilka.md](docs/eksperyment_pilka.md), §5.7.
+
 ### Eksperyment walidacyjny „piłka na dachu”
 
 Osobny lot i osobny config (`config_pilka.yaml`, `experiments/pilka.yaml`); opis i wyniki
@@ -378,6 +410,7 @@ geodetect/
   odm.py        CameraIO / CameraEO z reconstruction(.topocentric).json
   zcal.py       kalibracja Z: agl_assumption / ground_frame / dem_alignment / start_point
   align.py      georef similarity_nmpt: wyrównanie 7p rekonstrukcji ODM do NMPT (kamery, DSM)
+  qc.py         kontrola jakości rekonstrukcji (skala pionowa, ogniskowa, NMPT, baza kamer)
   detect.py     Detector (YOLO: klasy po nazwie, progi, kafle), list_models / model_info
   tiling.py     siatka kafli, scalanie detekcji z kafli (ucięte boxy, NMS)
   gt_labels.py  etykiety YOLO z eksportu Roboflow jako ground truth (letterbox, obrót)

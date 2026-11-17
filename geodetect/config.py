@@ -222,6 +222,24 @@ class StartConfig:
     image_height_m: Optional[float] = None
 
 
+@dataclass
+class QcConfig:
+    """Kontrola jakosci rekonstrukcji (geodetect/qc.py), uruchamiana w build_context na
+    georeferencji gps_only. Status: OK / OSTRZEZENIE / ZLY + zalecenia (7p, kalibracja kamery)."""
+    enabled: bool = True
+    vertical_scale_warn: float = 0.10   # |k - 1|, k: h_ODM kamer vs alt_EXIF (barometr)
+    vertical_scale_bad: float = 0.20
+    min_alt_range_m: float = 3.0        # krotszy zakres wysokosci -> skala nieokreslona
+    camera_focal: Optional[float] = None    # kalibracja referencyjna f/max(w,h); None -> EXIF f35
+    focal_warn_pct: float = 10.0
+    focal_bad_pct: float = 25.0
+    surface_nmad_warn_m: float = 0.5    # NMAD(DSM ODM - NMPT) po odjeciu mediany
+    surface_nmad_bad_m: float = 1.5
+    sample_step_m: float = 1.0
+    rotation_warn_deg: float = 2.0      # sqrt(2) * sigma_GPS / rozpietosc kamer
+    rotation_bad_deg: float = 5.0
+
+
 GEOREF_MODES = ("gps_only", "similarity_nmpt")
 
 
@@ -338,6 +356,7 @@ class PipelineConfig:
     aggregate: AggregateConfig = field(default_factory=AggregateConfig)
     z_anchor: ZAnchorConfig = field(default_factory=ZAnchorConfig)
     georef: GeorefConfig = field(default_factory=GeorefConfig)
+    qc: QcConfig = field(default_factory=QcConfig)
     surface: SurfaceConfig = field(default_factory=SurfaceConfig)
     point: PointConfig = field(default_factory=PointConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
@@ -424,7 +443,8 @@ _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_pat
 _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
            "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig,
-           "start": StartConfig, "georef": GeorefConfig}
+           "start": StartConfig, "georef": GeorefConfig,
+           "qc": QcConfig}
 
 
 def _build(cls, data: dict[str, Any]):

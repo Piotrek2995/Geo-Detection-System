@@ -28,6 +28,7 @@ class BatchResult:
     objects: list[AggregatedObject] = field(default_factory=list)
     z_calibration: Optional[ZCalibration] = None
     config: Optional[PipelineConfig] = None    # nazwy wyswietlane / kolory klas w eksporcie
+    qc: Optional[object] = None                # qc.QcReport (kontrola jakosci rekonstrukcji)
 
     @property
     def detections(self) -> list[GeoDetection]:
@@ -51,9 +52,17 @@ class BatchResult:
         return [o for o in self.objects if o.duplicate_images]
 
 
+def _qc_report(ctx):
+    from .qc import QcReport
+    qc = getattr(ctx, "qc", None)
+    return qc if isinstance(qc, QcReport) else None
+
+
 def summary_text(batch: BatchResult) -> str:
     """Czytelne podsumowanie wsadu (do CLI / logu / raportu)."""
     lines = []
+    if batch.qc is not None:
+        lines += batch.qc.lines()
     if batch.z_calibration is not None:
         lines.append(f"Kalibracja Z — {batch.z_calibration.describe()}")
     surfaces = sorted({gd.hit.surface for gd in batch.detections if gd.hit.surface})
@@ -136,7 +145,8 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
             skipped[name] = f"blad: {e}"
 
     save_dem_cache(ctx.dem)
-    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration, config=cfg)
+    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration, config=cfg,
+                        qc=_qc_report(ctx))
     batch.objects = aggregate(batch.detections, cfg.aggregate)
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),

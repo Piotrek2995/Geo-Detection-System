@@ -41,6 +41,7 @@ class PipelineContext:
     surface: Optional[Surface] = None   # powierzchnia ray castingu; None = `dem`
     segmenter: Optional[Segmenter] = None   # SAM, tworzony leniwie (tylko metody mask_*)
     alignment: Optional[object] = None      # align.GeorefAlignment (georef.mode=similarity_nmpt)
+    qc: Optional[object] = None             # qc.QcReport (kontrola jakosci rekonstrukcji)
 
     @property
     def ray_surface(self) -> Surface:
@@ -108,6 +109,14 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
     z_cal = calibrate_z(config, dem, rec, base_frame)
     log.info("Kalibracja Z — %s", z_cal.describe())
+    qc = None
+    if config.qc.enabled:
+        # na georeferencji gps_only (przed ewentualnym 7p): ocena rekonstrukcji i zalecenie trybu
+        from .qc import run_qc
+        try:
+            qc = run_qc(config, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt), dem)
+        except Exception as exc:          # QC jest diagnostyka — nie blokuje przetwarzania
+            log.warning("Kontrola jakosci rekonstrukcji pominieta: %s", exc)
     config.georef.validate()
     alignment = None
     if config.georef.mode == "similarity_nmpt":
@@ -133,6 +142,7 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     ctx = PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
                           z_cal, detector, surface)
     ctx.alignment = alignment
+    ctx.qc = qc
     return ctx
 
 

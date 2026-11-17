@@ -160,3 +160,25 @@ z_anchor:
   max_dsm_dtm_m: 0.5          # przy obu DEM-ach: tylko punkty z DSM-DTM < 0.5 m
   apply_tilt: false           # true = korygowac tez dopasowana plaszczyzne (przechyl EO z ODM)
   seed: 0
+
+# Georeferencja rekonstrukcji (geodetect/align.py). Domyslnie GPS drona + z_anchor; wyrownanie 7p
+# do NMPT (similarity_nmpt) jako opcja — zalecana przez kontrole jakosci (qc), gdy rekonstrukcja
+# ma poprawna geometrie (skala pionowa ~1), a georeferencja odbiega od NMPT. Przy zle
+# skalibrowanej kamerze 7p tylko kompensuje deformacje (docs/eksperyment_pilka.md, 5.6-5.7).
+georef:
+  mode: gps_only                # gps_only | similarity_nmpt
+  sigma_gps_xy_m: 3.0           # prior XY kamer z EXIF (takze do oceny bazy kamer w qc)
+  use_baro_prior: true          # wysokosci barometryczne (gdy z_anchor.start)
+  sigma_baro_m: 0.5
+
+# Kontrola jakosci rekonstrukcji (geodetect/qc.py): wynik w podsumowaniu batcha.
+qc:
+  enabled: true
+  vertical_scale_warn: 0.10     # |k - 1|, k: h_ODM kamer vs barometr EXIF
+  vertical_scale_bad: 0.20
+  camera_focal: null            # znana kalibracja f/max(w,h); null = porownanie z EXIF f35
+                                # (EXIF Potensic Atom LT nie uwzglednia kadrowania -> tylko ostrzezenie)
+  surface_nmad_warn_m: 0.5      # NMAD(DSM ODM - NMPT)
+  surface_nmad_bad_m: 1.5
+  rotation_warn_deg: 2.0        # sqrt(2) * sigma_GPS / rozpietosc kamer
+  rotation_bad_deg: 5.0

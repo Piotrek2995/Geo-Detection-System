@@ -94,3 +94,8 @@ z_anchor:
   max_dsm_dtm_m: 0.3
   apply_tilt: false
   seed: 0
+
+georef:
+  mode: gps_only                # experiments/pilka*.yaml: warianty similarity_nmpt (7p)
+qc:
+  enabled: true

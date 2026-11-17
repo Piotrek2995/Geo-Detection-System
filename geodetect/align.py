@@ -587,6 +587,19 @@ def aligned_dsm_surface(dsm_path: Path, frame: EnuFrame, sim: Similarity, res_m:
     return RasterSurface(Grid(Z, float(x0), float(y1), res_m, res_m, "EPSG:2180"), name, VERTICAL_NPM)
 
 
+def raster_h(path: Path, x, y) -> float:
+    """Wysokosc ODM (h, uklad L) rastra ODM (DSM/DTM) w punkcie (x, y) EPSG:2180 ukladu ODM
+    (mediana 5x5 px, odporna na pojedyncze piksele)."""
+    import rasterio
+    from pyproj import Transformer
+    with rasterio.open(path) as ds:
+        e, n = Transformer.from_crs("EPSG:2180", ds.crs, always_xy=True).transform(x, y)
+        r, c = ds.index(e, n)
+        w = ds.read(1, window=((r - 2, r + 3), (c - 2, c + 3))).astype(float)
+        w = w[(w > -1e4) & np.isfinite(w)]
+    return float(np.median(w)) if len(w) else float("nan")
+
+
 _CACHE: dict = {}
 
 
@@ -608,16 +621,7 @@ class GeorefAlignment:
         return self._dsm
 
     def raster_h(self, path: Path, x, y) -> float:
-        """Wysokosc ODM (h, uklad L) rastra ODM (DSM/DTM) w punkcie (x, y) EPSG:2180 ukladu ODM
-        (mediana 5x5 px, odporna na pojedyncze piksele)."""
-        import rasterio
-        from pyproj import Transformer
-        with rasterio.open(path) as ds:
-            e, n = Transformer.from_crs("EPSG:2180", ds.crs, always_xy=True).transform(x, y)
-            r, c = ds.index(e, n)
-            w = ds.read(1, window=((r - 2, r + 3), (c - 2, c + 3))).astype(float)
-            w = w[(w > -1e4) & np.isfinite(w)]
-        return float(np.median(w)) if len(w) else float("nan")
+        return raster_h(path, x, y)
 
     def map_odm_point(self, x, y, path: Optional[Path] = None) -> np.ndarray:
         """Punkt z ortofotomapy/DSM ODM (x, y w ukladzie gps_only, h z DSM) -> uklad wyrownany."""

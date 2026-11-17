@@ -910,6 +910,15 @@ class ExperimentRunner:
             L.append(f"| {v.name} | {ov} |")
         L.append("")
 
+        qcs: dict = {}
+        for n, vr in self.results.items():
+            q = getattr(vr.ctx, "qc", None)
+            if q is not None:
+                qcs.setdefault(id(q), (q, str(vr.cfg.odm_dir), []))[2].append(n)
+        for q, odm, used in qcs.values():
+            L += [f"## Kontrola jakości rekonstrukcji — `{Path(odm).name}` (z_offset wariantów: "
+                  f"{', '.join(used[:4])}{' …' if len(used) > 4 else ''})", ""]
+            L += [f"- {x.strip()}" for x in q.lines()] + [""]
         seen = set()
         for n, vr in self.results.items():
             al = getattr(vr.ctx, "alignment", None)

@@ -367,6 +367,88 @@ rozstrzygnąć co do dokładności.
 - Opcjonalnej obserwacji 2D (dopasowanie ortofotomap ODM ↔ GUGiK) nie wdrożono: automatyczne
   dopasowanie SIFT zawiodło (§3). Pary wskazane ręcznie posłużyły jako kontrola.
 
+### 5.7 Kalibracja kamery: kompensacja a korekta (rekonstrukcja z ustaloną kalibracją)
+
+**Weryfikacja kamery.** Oba loty mają identyczny EXIF:
+- Potensic Atom LT, obiektyw „DS 2.26mm F2.2”;
+- obraz 2560 × 1440 (16:9);
+- FocalLength 2,26 mm, FocalLengthIn35mmFilm 13 mm, DigitalZoomRatio 0.
+
+Tryb kamery, w zakresie, w jakim EXIF go opisuje, jest więc ten sam.
+
+Ogniskowa oczekiwana z EXIF (f/max(w, h)) zależy od przyjętej definicji:
+
+| definicja | wartość |
+|---|---|
+| ekwiwalent po przekątnej 43,27 mm | **0,345** |
+| przyjęcie ODM (f35/36) | 0,361 |
+| matryca 4:3 przycięta do 16:9 na pełnej szerokości | 0,376 |
+
+Samokalibracja ODM dała:
+- **0,528** w locie „namiot” (26 zdjęć, ~45 m, obszar 76 m);
+- **0,374** w locie „piłka” (19 zdjęć, 10–25 m, baza 9 m).
+
+Wartość z lotu piłki zgadza się z EXIF, ale to ta rekonstrukcja ma zdeformowaną geometrię (k = 0,68, §5.1). Znacznik f35 nie opisuje więc rzeczywistego pola widzenia obrazu 2560 × 1440. Prawdopodobnie EXIF podaje stałą wartość obiektywu i pomija kadrowanie lub stabilizację. Przy słabej geometrii lotu ODM praktycznie nie odchodzi od priora (0,361 → 0,374). Przeniesienie kalibracji z lotu „namiot” uznano za uprawnione: ta sama kamera, rozdzielczość, proporcje i EXIF. Przeniesiono pełny model Browna, z dystorsją i punktem głównym. Ogniskowej z EXIF nie użyto, bo wskazuje wartość zbliżoną do błędnej.
+
+**Rekonstrukcja `odm_pilka_fixcal`:** ODM 3.6 z `--cameras` (kalibracja z lotu „namiot”), `--use-fixed-camera-params`, `--dtm --dsm --pc-classify --dem-resolution 2`. Zarejestrowało się 19 z 19 zdjęć. Punkty dachu i piłkę przeniesiono ze starej ortofotomapy ODM na nową dopasowaniem SIFT (`scripts/transfer_ortho_points.py`): 130 zgodnych dopasowań, transformacja afiniczna, RMS 0,05 m. GT_transfer liczony z nowych par różni się od dotychczasowego o 0,11 m, czyli nie zależy od rekonstrukcji.
+
+**Wyniki** (`experiments/pilka_kalibracja.yaml`, piksele ręczne):
+
+| | stara (f 0,374) | fixcal (f 0,528) |
+|---|---|---|
+| skala pionowa k (h_ODM kamer vs barometr) | 0,682 ± 0,037 | **0,931 ± 0,056** |
+| pochylenie płaszczyzny dem_alignment | 14,2° | **4,4°** |
+| z_offset: start_point − dem_alignment | 5,3 m | **1,9 m** |
+| Helmert ortofotomapa ODM → GUGiK (4 punkty dachu): skala / obrót | 0,853 / 19,3° | 0,684 / 8,8° |
+
+| rekonstrukcja · georeferencja | skala 7p | pochylenie 7p | k baro po 7p | H modelu w GT Google − NMT (NMPT 6,65) | RMS wielowid. NMPT [m] | błąd vs GT_transfer NMPT / DSM [m] | punkty dachu RMS [m] |
+|---|---|---|---|---|---|---|---|
+| stara · gps_only + start_point | – | – | – | 8,18 | 0,44 | 3,44 / 2,87 | 3,18 |
+| stara · gps_only + dem_alignment | – | – | – | 2,83 | 1,41 | 2,00 / – | 3,18 |
+| stara · 7p z baro | 1,350 | 5,9° | 0,935 | 5,28 | 0,71 | 3,07 / 2,93 | 4,10 |
+| stara · 7p bez baro | 0,703 | 28,7° | 0,349 | 6,45 | 0,25 | **1,11 / 0,81** | **0,98** |
+| fixcal · gps_only + start_point | – | – | – | 3,07* | 0,72 | 3,90 / 5,00 | 5,02 |
+| fixcal · gps_only + dem_alignment | – | – | – | 1,14* | 1,10 | 3,30 / – | 5,02 |
+| **fixcal · 7p z baro** | **0,950** | **4,6°** | **0,885** | **6,67** | **0,20** | 1,52 / 1,51 | 1,92 |
+| fixcal · 7p bez baro | 0,772 | 12,3° | 0,646 | 6,95 | 0,15 | 1,95 / 1,93 | 1,72 |
+
+\* Bez wyrównania punkt GT Google wypada w modelu fixcal poza budynkiem, bo georeferencja GPS jest przesunięta o ~5 m.
+
+NMT dla fixcal (H1): błąd = 4,79·tan(inc) + 1,02 m, r = 0,90; trafienia 6,9 m pod dachem. **H1 potwierdzona także po ustaleniu kalibracji.**
+
+**Odpowiedź na pytanie kluczowe.** Po ustaleniu kalibracji wyrównanie 7p z priorem barometrycznym daje wynik **fizycznie spójny**:
+- skala 0,95, pochylenie 4,6° (zgodne niezależnie z płaszczyzną dem_alignment 4,4°);
+- wysokości kamer zgodne z barometrem (k = 0,885, RMS 1,0 m);
+- powierzchnia modelu w punkcie GT zgodna z NMPT (6,67 vs 6,65 m);
+- rozrzut wielowidokowy 0,20 m.
+
+Jest to **korekta**, a nie kompensacja. Dla porównania stara rekonstrukcja bez baro dawała pochylenie 28,7° i wysokości kamer k = 0,35.
+
+Błąd bezwzględny wynosi 1,5 m względem GT_transfer i 1,9 m dla punktów dachu. Jest to mniej niż w każdym wariancie gps_only (2,0–5,0 m), ale nie ~1 m, i nieco więcej niż „kompensujące” 7p bez baro na starej rekonstrukcji (0,8–1,1 m). Pozostała niezgodność ma charakter anizotropii:
+- powierzchnia bez priora baro woli skalę 0,77;
+- Helmert ortofotomapy daje 0,68;
+- barometr wymaga ~1,07.
+
+Model fixcal jest nadal poziomo rozciągnięty względem pionu, mniej więcej o czynnik 1,2–1,4. Najprawdopodobniej sama ogniskowa z lotu „namiot” jest zaniżona: nad płaskim terenem w nadirze f koreluje z wysokością lotu, a tam k = 1,14 ± 0,12. Pełna korekta wymaga kalibracji kamery niezależnej od lotu, np. szachownica OpenCV w trybie 2560 × 1440, albo lotu kalibracyjnego z rzeźbą terenu i kilkoma wysokościami.
+
+**Kompensacja a korekta — wniosek metodyczny.** Lepszy wynik liczbowy (stara rekonstrukcja, 7p bez baro: 0,8–1,1 m) pochodzi z transformacji, która dopasowuje dach kosztem fizycznie błędnej orientacji (28,7°) i wysokości kamer. Działa ona tylko dla punktów na dopasowanej powierzchni i nie przenosi się na inne obiekty ani wysokości. Wynik fixcal + 7p z baro jest liczbowo gorszy o ~0,5 m, ale każdy parametr ma sens fizyczny i jest potwierdzony niezależną obserwacją (barometr, płaszczyzna terenu, wysokość dachu). Za wynik pracy przyjmuje się ten drugi.
+
+**Zastrzeżenie dotyczące GT_transfer.** W NMPT punkt GT_transfer leży na zachodniej krawędzi budynku: okap ~3,3 m nad NMT, dach rośnie na wschód do 6,5–7,5 m. GT Google leży przy kalenicy (6,65 m). Trend H1 (§5.3, 6,72·tan(inc)) wskazuje wysokość piłki ~6,7 m nad gruntem, czyli bliżej kalenicy. GT_transfer może być zatem przesunięty o 1–2 m w stronę okapu, np. przez korektę lean, która dotyczy całego dachu, a nie konkretnej wysokości na połaci. Błędy względem GT_transfer rzędu 1–1,5 m są więc na granicy rozdzielczości tego odniesienia. Rozstrzygnięcie wymaga pomiaru RTK.
+
+**Kontrola jakości (QC, `geodetect/qc.py`)** na trzech rekonstrukcjach:
+
+| kontrola | namiot | piłka — stara | piłka — fixcal |
+|---|---|---|---|
+| skala pionowa k | 1,144 ± 0,123 (OK — w granicy niepewności, zakres 6 m) | 0,682 (ZŁY) | 0,931 (OK) |
+| ogniskowa vs EXIF (0,345) | +53 % (OSTRZEŻENIE*) | +9 % (OK) | +53 % (OSTRZEŻENIE*) |
+| NMAD DSM − NMPT | 3,61 m (ZŁY) | 2,91 m (ZŁY) | 3,58 m (ZŁY) |
+| baza kamer → błąd orientacji | 76 m → 3,2° (OSTRZEŻENIE) | 9 m → 27° (ZŁY) | 12 m → 20° (ZŁY) |
+| zalecenie | 7p | kalibracja kamery, potem 7p; GCP / większa baza | 7p; GCP / większa baza |
+
+\* EXIF nie uwzględnia kadrowania, więc porównanie z EXIF daje najwyżej ostrzeżenie. Z `qc.camera_focal` (kalibracja referencyjna) rozbieżność staje się błędem.
+
+QC poprawnie rozróżnia przypadek „najpierw kalibracja” (stara) od „wystarczy 7p” (fixcal, namiot).
+
 ## 6. Wnioski
 
 1. Wybór powierzchni ray castingu decyduje o poprawności lokalizacji obiektów na dachach:
@@ -381,7 +463,11 @@ rozstrzygnąć co do dokładności.
    tych błędów, bo wyznaczają tylko stałą wysokości.
    Wyrównanie 7p do NMPT (§5.6) zmniejsza błąd względem GT_transfer do 0,8–1,1 m (NMPT/DSM).
    Wymaga jednak wyłączenia priora barometrycznego, bo rekonstrukcja jest spłaszczona w pionie
-   przez błędną samokalibrację ogniskowej (0,374 vs 0,528 w locie „namiot”).
+   przez błędną samokalibrację ogniskowej (0,374 vs 0,528 w locie „namiot”). Jest to kompensacja.
+   Po ustaleniu kalibracji (§5.7) 7p z priorem barometrycznym daje wynik fizycznie spójny:
+   skala 0,95, pochylenie 4,6°, dach 6,67 m. Błąd wynosi 1,5 m względem GT_transfer i jest to
+   korekta. Pozostała anizotropia ~1,2–1,4 wskazuje, że do pełnej korekty potrzebna jest
+   kalibracja kamery niezależna od lotu.
 3. Kalibracja `start_point` z medianą jest poprawna tylko przy prawidłowej skali rekonstrukcji.
    Diagnostyka regresyjna (k = 0,68) wykrywa ten przypadek, a jej wynik zgadza się
    z `dem_alignment` z dokładnością do 0,9 m.
