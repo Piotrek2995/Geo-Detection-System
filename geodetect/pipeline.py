@@ -42,6 +42,7 @@ class PipelineContext:
     segmenter: Optional[Segmenter] = None   # SAM, tworzony leniwie (tylko metody mask_*)
     alignment: Optional[object] = None      # align.GeorefAlignment (georef.mode=similarity_nmpt)
     qc: Optional[object] = None             # qc.QcReport (kontrola jakosci rekonstrukcji)
+    georef_decision: Optional[str] = None   # georef.mode "auto": dlaczego wybrano dany tryb
 
     @property
     def ray_surface(self) -> Surface:
@@ -102,27 +103,11 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     (wspoldzielone miedzy wariantami eksperymentu), inaczej sa budowane z configu."""
     config.point.validate()
     dem = dem if dem is not None else resolve_dem(config.dem)
-    rec = reconstruction if reconstruction is not None else         OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
-    base_frame = EnuFrame(rec.ref)
-    # DECYZJA METODYCZNA: z_offset liczony raz, wzgledem NMT referencyjnego (sekcja `dem`),
-    # niezaleznie od powierzchni ray castingu (sekcja `surface`). Gdyby kalibracja zalezala
-    # od wybranej powierzchni (NMT / NMPT / DSM ODM), porownanie powierzchni mieszaloby sie
-    # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
-    z_cal = calibrate_z(config, dem, rec, base_frame)
-    log.info("Kalibracja Z — %s", z_cal.describe())
-    config.georef.validate()
-    rec_gps, z_cal_gps = rec, z_cal
-    alignment = None
-    if config.georef.mode == "similarity_nmpt":
-        # Wyrownanie 7p do NMPT: z_anchor daje tylko start (tz). W ukladzie wyrownanym
-        # H [m npm] = h (tz zawiera z_offset), wiec ramka ma z_offset = 0.
-        from .align import align_reconstruction
-        alignment = align_reconstruction(config, rec, base_frame, z_cal, dem)
-        rec = alignment.reconstruction
-        z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
-        if config.surface.source == "odm_dsm":
-            surface = alignment.dsm_surface()
-    qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, alignment, dem) if config.qc.enabled else None
+    g = georeference(config, dem, reconstruction)
+    rec, base_frame, z_cal, alignment, qc = g.reconstruction, g.base_frame, g.z_calibration, g.alignment, g.qc
+    config = g.config            # "auto" -> faktycznie uzyty tryb (raport, eksport)
+    if alignment is not None and config.surface.source == "odm_dsm" and surface is None:
+        surface = alignment.dsm_surface()
     cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
                      for n in rec.image_names])
     if surface is None:
@@ -138,7 +123,75 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
                           z_cal, detector, surface)
     ctx.alignment = alignment
     ctx.qc = qc
+    ctx.georef_decision = g.decision
     return ctx
+
+
+@dataclass
+class Georeference:
+    """Wynik georeferencji rekonstrukcji (bez detektora i powierzchni ray castingu)."""
+    reconstruction: object                 # OdmReconstruction albo AlignedReconstruction (7p)
+    base_frame: EnuFrame
+    z_calibration: ZCalibration            # aktywna (po 7p: similarity_nmpt, z_offset 0)
+    alignment: Optional[object] = None     # align.GeorefAlignment
+    qc: Optional[object] = None            # qc.QcReport
+    z_calibration_gps: Optional[ZCalibration] = None   # z_anchor przed 7p
+    mode: str = "gps_only"                 # tryb faktycznie uzyty (po rozstrzygnieciu "auto")
+    decision: Optional[str] = None         # uzasadnienie wyboru w trybie "auto"
+    config: Optional[PipelineConfig] = None  # config z georef.mode = mode (do kontekstu / eksportu)
+
+
+def georeference(config: PipelineConfig, dem: Optional[DemSampler] = None,
+                 reconstruction: Optional[OdmReconstruction] = None, with_qc: Optional[bool] = None) -> Georeference:
+    """Kalibracja Z (z_anchor), opcjonalnie 7p (georef.mode) i QC — czesc build_context bez
+    modelu detekcji (GUI: "Sprawdz jakosc rekonstrukcji")."""
+    dem = dem if dem is not None else resolve_dem(config.dem)
+    rec = reconstruction if reconstruction is not None else         OdmReconstruction(config.reconstruction_path, config.reference_lla_path)
+    base_frame = EnuFrame(rec.ref)
+    # DECYZJA METODYCZNA: z_offset liczony raz, wzgledem NMT referencyjnego (sekcja `dem`),
+    # niezaleznie od powierzchni ray castingu (sekcja `surface`). Gdyby kalibracja zalezala
+    # od wybranej powierzchni (NMT / NMPT / DSM ODM), porownanie powierzchni mieszaloby sie
+    # z kalibracja i roznice wynikow nie bylyby przypisywalne samej powierzchni.
+    z_cal = calibrate_z(config, dem, rec, base_frame)
+    log.info("Kalibracja Z — %s", z_cal.describe())
+    config.georef.validate()
+    rec_gps, z_cal_gps = rec, z_cal
+    alignment = None
+    mode, decision = config.georef.mode, None
+    run = config.qc.enabled if with_qc is None else with_qc
+    qc = None
+    if mode == "auto":
+        qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, None, dem)
+        from .qc import auto_georef_choice
+        mode, decision = auto_georef_choice(qc)
+        log.info("Georeferencja automatyczna: %s", decision)
+    if mode == "similarity_nmpt":
+        # Wyrownanie 7p do NMPT: z_anchor daje tylko start (tz). W ukladzie wyrownanym
+        # H [m npm] = h (tz zawiera z_offset), wiec ramka ma z_offset = 0.
+        from .align import align_reconstruction
+        try:
+            alignment = align_reconstruction(config, rec, base_frame, z_cal, dem)
+        except Exception as exc:
+            if config.georef.mode != "auto":
+                raise
+            log.warning("Wyrownanie do NMPT niemozliwe (%s) — standard gps_only", exc)
+            mode, decision = "gps_only", f"Wybrano standard (GPS drona), bo wyrównanie do NMPT się nie powiodło ({exc})."
+        else:
+            rec = alignment.reconstruction
+            z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
+    if run and (qc is None or alignment is not None):
+        qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, alignment, dem)
+    used = config
+    if config.georef.mode != mode:
+        import copy
+        used = copy.deepcopy(config)
+        used.georef.mode = mode
+    return Georeference(rec, base_frame, z_cal, alignment, qc, z_cal_gps, mode, decision, used)
+
+
+def check_reconstruction(config: PipelineConfig, dem: Optional[DemSampler] = None) -> Georeference:
+    """QC rekonstrukcji dla biezacych ustawien (z_anchor, georef) — zawsze z kontrola jakosci."""
+    return georeference(config, dem, with_qc=True)
 
 
 def _run_qc(config, rec_gps, base_frame, z_cal, alignment, dem):

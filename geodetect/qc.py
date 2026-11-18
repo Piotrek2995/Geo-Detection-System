@@ -37,7 +37,8 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 OK, WARN, BAD, NA = "OK", "OSTRZEŻENIE", "ZŁY", "brak danych"
-_RANK = {NA: -1, OK: 0, WARN: 1, BAD: 2}
+INFO = "informacja"     # wynik do wiadomosci, nie wplywa na ocene (np. ogniskowa vs EXIF)
+_RANK = {NA: -1, INFO: -1, OK: 0, WARN: 1, BAD: 2}
 DIAG_35MM = 43.27
 
 REC_CALIB = ("ustal kalibrację kamery: ODM --cameras <cameras.json z lotu o dobrej geometrii> "
@@ -73,6 +74,22 @@ class QcReport:
     def to_dict(self) -> dict:
         return json.loads(json.dumps({"status": self.status, "recommendations": self.recommendations,
                                       "checks": [c.__dict__ for c in self.checks]}, default=float))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "QcReport":
+        """Odwrotnosc to_dict (run_report.json -> panel QC w GUI)."""
+        checks = [QcCheck(c["name"], c["status"], c.get("value"), c.get("text", ""), c.get("details") or {})
+                  for c in d.get("checks", [])]
+        status = d.get("status", NA)
+        # raporty sprzed statusu "informacja": ogniskowa wzgledem EXIF bywala ostrzezeniem
+        fixed = False
+        for c in checks:
+            if c.name == "focal" and c.status == WARN and "EXIF" in str(c.details.get("source", "")):
+                c.status, fixed = INFO, True
+        if fixed:
+            status = max((c.status for c in checks), key=lambda x: _RANK[x], default=NA)
+            status = OK if status in (NA, INFO) else status
+        return cls(checks, status, list(d.get("recommendations", [])))
 
 
 def _grade(x: float, warn: float, bad: float) -> str:
@@ -110,14 +127,15 @@ def check_focal(focal: float, cfg, f35: Optional[float] = None, width: int = 0, 
     if cfg.camera_focal:
         ref, src, cap = float(cfg.camera_focal), "kalibracja referencyjna (qc.camera_focal)", BAD
     elif f35 and width and height:
-        ref, src, cap = expected_focal_exif(f35, width, height), f"EXIF f35 = {f35:g} mm", WARN
+        # EXIF nie uwzglednia kadrowania matrycy: odchylenie to informacja, nie ostrzezenie
+        ref, src, cap = expected_focal_exif(f35, width, height), f"EXIF f35 = {f35:g} mm", INFO
     else:
         return QcCheck("focal", NA, focal, f"ogniskowa ODM {focal:.4f}: brak odniesienia (EXIF f35 / qc.camera_focal)")
     d = 100 * (focal / ref - 1)
     st = _grade(abs(d), cfg.focal_warn_pct, cfg.focal_bad_pct)
-    if _RANK[st] > _RANK[cap]:
-        st = cap
-    note = "" if cap == BAD else " (EXIF nie uwzględnia kadrowania — najwyżej ostrzeżenie)"
+    if cap == INFO and st != OK:
+        st = INFO
+    note = "" if cap == BAD else " (EXIF nie uwzględnia kadrowania: tylko informacja)"
     return QcCheck("focal", st, d, f"ogniskowa ODM {focal:.4f} vs {ref:.4f} ({src}): {d:+.1f} %{note}",
                    {"focal_odm": focal, "focal_ref": ref, "source": src, "diff_pct": d})
 
@@ -313,3 +331,96 @@ def _surface_checks(config, frame, cams_xy, active, mode) -> list[QcCheck]:
     sb = surface_stats(*resid(before))
     sa = surface_stats(*resid(np.asarray(active(P), float))) if active is not None else sb
     return check_surface_modes(sb, sa, config.qc, label, mode)
+
+
+# ───────────── opisy dla uzytkownika spoza projektu (GUI, raport) ─────────────
+
+TITLES = {"vertical_scale": "Skala pionowa modelu", "focal": "Kalibracja kamery",
+          "surface": "Zgodność z NMPT GUGiK", "tilt": "Pochylenie modelu",
+          "baseline": "Zasięg lotu"}
+
+# zalecenia w jezyku interfejsu (GUI); action: kod akcji do przycisku "Zastosuj"
+ACTIONS = {
+    REC_CALIB: ("Uruchom rekonstrukcję ponownie z ustaloną kalibracją kamery (strona Projekt).", "odm_fixed_cal"),
+    REC_7P: ("Na stronie Georeferencja wybierz wyrównanie do NMPT.", "georef_nmpt"),
+    REC_BASE: ("Przy kolejnym locie obejmij większy obszar, lataj na kilku wysokościach albo dodaj punkty "
+               "kontrolne.", None),
+}
+
+
+def explain(c: QcCheck) -> str:
+    """Jedno zdanie prostym jezykiem: co wyszlo i co zrobic."""
+    d, v, st = c.details or {}, c.value, c.status
+    if st == NA or v is None:
+        return "Brak danych do tej kontroli."
+    aligned = str(d.get("mode", "")).startswith("similarity")
+    if c.name == "vertical_scale":
+        if st == OK:
+            return f"Wysokości w modelu zgadzają się z barometrem drona (skala {v:.2f})."
+        kind = "spłaszczony" if v < 1 else "rozciągnięty"
+        return (f"Model jest {kind} w pionie (skala {v:.2f} zamiast 1), zwykle przez błędną kalibrację kamery.")
+    if c.name == "focal":
+        if st == OK:
+            return f"Ogniskowa kamery w modelu jest zgodna z oczekiwaną ({v:+.0f}%)."
+        if st == INFO:
+            return (f"Ogniskowa różni się o {v:+.0f}% od wartości z EXIF. To normalne, bo EXIF nie uwzględnia "
+                    "kadrowania obrazu.")
+        return f"Ogniskowa różni się o {v:+.0f}% od kalibracji referencyjnej, model może być zdeformowany."
+    if c.name == "surface":
+        if st == OK:
+            return f"Kształt modelu zgadza się z NMPT GUGiK (typowa różnica {v:.2f} m)."
+        return (f"Kształt modelu odbiega od NMPT GUGiK (typowa różnica {v:.2f} m): model jest zdeformowany "
+                "albo teren się zmienił.")
+    if c.name == "tilt":
+        b = (d.get("before") or {}).get("tilt_deg")
+        if aligned:
+            pre = (f"Po wyrównaniu do NMPT pochylenie spadło z {b:.1f}° do {v:.1f}°." if b is not None else
+                   f"Pochylenie po wyrównaniu do NMPT: {v:.1f}°.")
+            return pre + ("" if st == OK else " Nadal duże, sprawdź kalibrację kamery.")
+        if st == OK:
+            return f"Model jest prawie poziomy (pochylenie {v:.1f}°)."
+        return f"Model jest pochylony o {v:.1f}°, obiekty wysoko nad gruntem będą przesunięte."
+    if c.name == "baseline":
+        span = d.get("span_m")
+        sp = f"Zdjęcia obejmują obszar ok. {span:.0f} m" if span else "Obszar zdjęć"
+        if st == OK:
+            return f"{sp}, to wystarcza do ustalenia orientacji modelu z GPS."
+        return (f"{sp}; przy dokładności GPS ±{d.get('sigma_gps_m', 3):.0f} m orientacja modelu może być błędna "
+                f"o ok. {v:.0f}°." + (" Orientację poprawiło wyrównanie do NMPT." if aligned else ""))
+    return c.text
+
+
+def explain_report(rep: QcReport, top: int = 3) -> dict:
+    """Panel QC w GUI: {"status", "summary", "checks": [(tytul, status, opis)] od najwazniejszych,
+    "top": ile pokazac od razu, "actions": [(tekst, kod_akcji|None)]}. Kontrole informacyjne na koncu."""
+    summary = {OK: "Rekonstrukcja wygląda dobrze.",
+               WARN: "Rekonstrukcja jest użyteczna, ale ma słabsze strony.",
+               BAD: "Rekonstrukcja ma poważne problemy, wyniki mogą być przesunięte o kilka metrów.",
+               NA: "Brak danych do oceny."}[rep.status]
+    order = sorted(rep.checks, key=lambda c: -_RANK[c.status])
+    actions = [ACTIONS.get(_rec_key(r), (r, None)) for r in rep.recommendations]
+    return {"status": rep.status, "summary": summary,
+            "checks": [(TITLES.get(c.name, c.name), c.status, explain(c)) for c in order],
+            "top": min(top, sum(1 for c in order if c.status in (WARN, BAD)) or top),
+            "actions": actions, "recommendations": list(rep.recommendations)}
+
+
+def _rec_key(r: str) -> str:
+    return next((k for k in ACTIONS if r.startswith(k)), r)
+
+
+# ───────────── automatyczny wybor georeferencji ─────────────
+
+def auto_georef_choice(rep: Optional[QcReport]) -> tuple[str, str]:
+    """georef.mode "auto": (tryb, uzasadnienie jednym zdaniem) z QC wariantu gps_only.
+    Wyrownanie do NMPT, gdy QC je zaleca (zly ksztalt, pochylenie albo slaba baza)."""
+    if rep is None:
+        return "gps_only", "Wybrano standard (GPS drona), bo brak danych do kontroli jakości."
+    by = {c.name: c for c in rep.checks}
+    bad = [by[n] for n in ("tilt", "surface", "baseline") if n in by and by[n].status in (WARN, BAD)]
+    if not bad:
+        return "gps_only", "Wybrano standard (GPS drona), bo model jest zgodny z NMPT GUGiK."
+    c = bad[0]
+    why = {"tilt": f"model jest pochylony o {c.value:.1f}°" if c.value is not None else "model jest pochylony",
+           "surface": "kształt modelu odbiega od NMPT", "baseline": "zasięg lotu jest mały"}[c.name]
+    return "similarity_nmpt", f"Wybrano wyrównanie do NMPT, bo {why}."

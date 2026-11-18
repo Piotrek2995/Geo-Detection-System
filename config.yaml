@@ -120,7 +120,6 @@ size:
   ranges_m:                   # wiekszy wymiar poziomy [m]; klasa bez wpisu = bez filtra
     namiot: [1.5, 6.0]
     people: [0.3, 2.5]
-    sports ball: [0.1, 0.5]
   min_cos_incidence: 0.3      # promien bardziej ukosny -> rozmiar bez korekty kata
   exclude_border: true        # detekcje uciete krawedzia kadru pomijane w medianie (jesli sa inne)
 

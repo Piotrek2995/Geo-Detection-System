@@ -56,6 +56,7 @@ class ModelInfo:
     size_mb: float
     date: Optional[str] = None
     train_data: Optional[str] = None
+    open_vocab: bool = False          # YOLOE / YOLO-World: klasy z promptu (detect.prompt_text)
 
     @property
     def label(self) -> str:
@@ -94,7 +95,26 @@ def model_info(path: Path | str) -> Optional[ModelInfo]:
     task = args.get("task") or getattr(model, "task", None) or "detect"
     return ModelInfo(path, path.name, str(task), {int(k): str(v) for k, v in names.items()},
                      _imgsz_value(args.get("imgsz")), path.stat().st_size / 2 ** 20,
-                     ck.get("date"), args.get("data"))
+                     ck.get("date"), args.get("data"), is_open_vocab_model(model))
+
+
+def is_open_vocab_model(model) -> bool:
+    """Model otwartego slownika (YOLOE, YOLO-World) — po nazwie klasy modelu ultralytics."""
+    name = type(model).__name__
+    return "YOLOE" in name or "World" in name
+
+
+def prompt_class_names(cfg: DetectConfig) -> Optional[list[str]]:
+    """Klasy modelu otwartego slownika wg promptu (wizualny ma pierwszenstwo), None = bez promptu."""
+    if cfg.uses_visual_prompt():
+        names = list(cfg.visual_prompt_classes or [])
+        n = len(cfg.visual_prompt_boxes)
+        if len(names) != n:
+            names = (names or ["obiekt"])[:1] * n
+        return list(dict.fromkeys(names))
+    if cfg.prompt_text:
+        return list(cfg.prompt_text)
+    return None
 
 
 def list_models(folder: Path | str) -> list[ModelInfo]:
@@ -138,6 +158,10 @@ class Detector:
         self.cfg = cfg or DetectConfig()
         self.model_path = Path(model_path)
         self.model = YOLO(str(model_path))
+        self.open_vocab = is_open_vocab_model(getattr(self.model, "model", None))
+        self._vp = None
+        if self.open_vocab:
+            self._setup_prompt()
         self.names: dict[int, str] = {int(k): v for k, v in dict(self.model.names).items()}
         self.task = self.model.task
         c = self.cfg
@@ -160,16 +184,48 @@ class Detector:
                  f" per klasa {c.conf_per_class}" if c.conf_per_class else "", c.iou,
                  c.device or "auto", c.half, c.tiling.enabled)
 
+    def _setup_prompt(self) -> None:
+        """YOLOE / YOLO-World: klasy z promptu tekstowego albo wizualnego (cfg.detect)."""
+        c = self.cfg
+        names = prompt_class_names(c)
+        if names is None:
+            log.warning("%s: model otwartego slownika bez promptu — uzywa domyslnych klas",
+                        self.model_path.name)
+            return
+        if c.uses_visual_prompt():
+            from ultralytics import YOLOE
+            from ultralytics.models.yolo.yoloe import YOLOEVPDetectPredictor, YOLOEVPSegPredictor
+            self.model = YOLOE(str(self.model_path))
+            per_box = list(c.visual_prompt_classes or [])
+            if len(per_box) != len(c.visual_prompt_boxes):
+                per_box = [names[0]] * len(c.visual_prompt_boxes)
+            seg = self.model.task == "segment"
+            self._vp = {"refer_image": str(c.visual_prompt_image),
+                        "visual_prompts": {"bboxes": np.asarray(c.visual_prompt_boxes, float),
+                                           "cls": np.array([names.index(n) for n in per_box])},
+                        "predictor": YOLOEVPSegPredictor if seg else YOLOEVPDetectPredictor}
+            log.info("YOLOE prompt wizualny: %s, %d box(y), klasy %s", Path(c.visual_prompt_image).name,
+                     len(per_box), names)
+            # nazwy klas z promptu wizualnego ustawiane przez predyktor; ustaw je jawnie dla walidacji
+            self.model.model.names = dict(enumerate(names))
+            return
+        try:
+            self.model.set_classes(names, self.model.get_text_pe(names))
+        except (TypeError, AttributeError):
+            self.model.set_classes(names)
+        log.info("Model otwartego slownika: prompt tekstowy %s", names)
+
     # -- surowe wywolanie modelu --
     def _predict(self, sources: list, conf: float) -> list:
         c = self.cfg
         out = []
         t0 = time.perf_counter()
-        for i in range(0, len(sources), max(1, c.batch)):
+        step = 1 if self._vp else max(1, c.batch)       # prompt wizualny: zdjecie po zdjeciu
+        for i in range(0, len(sources), step):
             out.extend(self.model.predict(
-                sources[i:i + c.batch], imgsz=self.imgsz, conf=conf, iou=c.iou,
+                sources[i:i + step], imgsz=self.imgsz, conf=conf, iou=c.iou,
                 classes=self.class_ids, device=c.torch_device(), half=c.half,
-                max_det=c.max_det, verbose=False))
+                max_det=c.max_det, verbose=False, **(self._vp or {})))
         self.infer_s += time.perf_counter() - t0
         return out
 

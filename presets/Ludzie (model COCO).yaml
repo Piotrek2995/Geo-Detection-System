@@ -1,0 +1,60 @@
+# Preset GUI: Ludzie (model COCO) (ustawienia detekcji)
+model_path: models/yolo26l.pt
+detect:
+  conf: 0.25
+  conf_per_class:
+    person: 0.25
+  classes:
+  - person
+  display_names:
+    person: człowiek
+  colors:
+    person: '#e8590c'
+  iou: 0.7
+  imgsz: null
+  device: auto
+  half: true
+  max_det: 300
+  batch: 8
+  top_k_per_class: null
+  tiling:
+    enabled: true
+    classes:
+    - person
+    tile_size: null
+    overlap: 0.2
+    include_full: true
+    edge_margin_px: 3.0
+    nms_iou: 0.5
+    contain_ios: 0.6
+  source: model
+  manual_csv: null
+  detections_csv: null
+  manual_class: manual
+  manual_box_px: 6.0
+  prompt_text: null
+  visual_prompt_image: null
+  visual_prompt_boxes: null
+  visual_prompt_classes: null
+point:
+  method: bbox_bottom_center
+  per_class: {}
+  sam_model: models/sam2.1_b.pt
+  sam_device: null
+  mask_cache_dir: output/cache/masks
+  min_area_ratio: 0.1
+  max_area_ratio: 0.97
+  min_largest_frac: 0.6
+  edge_tol_px: 2.0
+  min_offnadir_deg: 5.0
+  contact_band: 0.05
+  footprint_samples: 200
+  seed: 0
+size:
+  enabled: true
+  ranges_m:
+    person:
+    - 0.3
+    - 2.5
+  min_cos_incidence: 0.3
+  exclude_border: true

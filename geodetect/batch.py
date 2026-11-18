@@ -34,6 +34,7 @@ class BatchResult:
     z_calibration: Optional[ZCalibration] = None
     config: Optional[PipelineConfig] = None    # nazwy wyswietlane / kolory klas w eksporcie
     qc: Optional[object] = None                # qc.QcReport (kontrola jakosci rekonstrukcji)
+    georef_decision: Optional[str] = None      # uzasadnienie wyboru przy georef.mode "auto"
 
     @property
     def detections(self) -> list[GeoDetection]:
@@ -155,8 +156,10 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
             skipped[name] = f"blad: {e}"
 
     save_dem_cache(ctx.dem)
-    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration, config=cfg,
-                        qc=_qc_report(ctx))
+    # ctx.config: przy georef.mode "auto" zawiera faktycznie uzyty tryb
+    batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration,
+                        config=getattr(ctx, "config", None) or cfg, qc=_qc_report(ctx),
+                        georef_decision=getattr(ctx, "georef_decision", None))
     batch.objects = aggregate(batch.detections, cfg.aggregate, cfg.size)
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),

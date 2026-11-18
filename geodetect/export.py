@@ -353,6 +353,57 @@ def crop_thumbnail(img, bbox, max_px: int, pad: float = 0.35, min_side_px: int =
     return crop
 
 
+def _bgr(hex_rgb: str) -> tuple[int, int, int]:
+    h = hex_rgb.lstrip("#")
+    return int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16)
+
+
+def draw_detections(img, boxes: list[dict], max_px: Optional[int] = 1600):
+    """Rysuje boxy na kopii obrazu BGR. boxes: [{"bbox": (x1,y1,x2,y2), "label": str, "color": "#rrggbb"}].
+    Zwraca obraz RGB (zmniejszony do max_px dluzszego boku)."""
+    import cv2
+    out = img.copy()
+    s = 1.0
+    if max_px and max(out.shape[:2]) > max_px:
+        s = max_px / max(out.shape[:2])
+        out = cv2.resize(out, (int(out.shape[1] * s), int(out.shape[0] * s)), interpolation=cv2.INTER_AREA)
+    th = max(2, int(round(max(out.shape[:2]) / 600)))
+    for b in boxes:
+        x1, y1, x2, y2 = [int(round(v * s)) for v in b["bbox"]]
+        cv2.rectangle(out, (x1, y1), (x2, y2), _bgr(b.get("color") or CLASS_PALETTE[0]), th)
+    labeled = [b for b in boxes if b.get("label")]
+    if not labeled:
+        return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+    # etykiety przez PIL (TrueType: polskie znaki; cv2.putText zna tylko ASCII)
+    from PIL import Image, ImageDraw
+    im = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+    dr = ImageDraw.Draw(im)
+    font = _label_font(max(12, 7 * th))
+    for b in labeled:
+        x1, y1 = int(round(b["bbox"][0] * s)), int(round(b["bbox"][1] * s))
+        l, t, r, btm = dr.textbbox((0, 0), b["label"], font=font)
+        tw, tht = r - l, btm - t
+        y0 = max(0, y1 - tht - 8)
+        dr.rectangle([x1, y0, x1 + tw + 8, y0 + tht + 8], fill=b.get("color") or CLASS_PALETTE[0])
+        dr.text((x1 + 4 - l, y0 + 4 - t), b["label"], fill="white", font=font)
+    return np.asarray(im)
+
+
+def _label_font(size: int):
+    from PIL import ImageFont
+    for name in ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def read_image(path: Path):
+    """Obraz BGR (sciezki z polskimi znakami na Windows)."""
+    return _read_image(Path(path))
+
+
 def make_thumbnails(batch: BatchResult, out_dir: Path) -> dict[int, dict]:
     """Miniatura kazdego obiektu z jego najlepszego widoku: {object_id: {path, image, b64}}."""
     import cv2
@@ -421,7 +472,7 @@ def make_folium_map(batch: BatchResult, thumbs: Optional[dict] = None):
     cams = [r.camera for r in batch.images]
     center = [float(np.mean([c.lat for c in cams])), float(np.mean([c.lon for c in cams]))]
     m = folium.Map(location=center, zoom_start=19, max_zoom=23, tiles=None)
-    add_basemaps(m)
+    add_basemaps(m, buildings=True)
 
     fg_cam = folium.FeatureGroup(name="Kamery")
     for r in batch.images:
@@ -559,10 +610,12 @@ def run_parameters(batch: BatchResult) -> dict:
     return {
         "model": str(cfg.model_path), "detect_source": getattr(d, "source", "model"),
         "classes": d.classes if d.classes not in (None, "all") else "all",
-        "display_names": d.display_names, "conf": d.conf, "conf_per_class": d.conf_per_class,
+        "display_names": d.display_names, "class_colors": class_colors(batch),
+        "conf": d.conf, "conf_per_class": d.conf_per_class,
         "iou": d.iou, "imgsz": d.imgsz, "tiling": bool(getattr(d.tiling, "enabled", False)),
         "point_method": cfg.point.method, "point_per_class": cfg.point.per_class,
-        "surface": cfg.surface.source, "georef_mode": georef_mode(batch), "z_calibration": z,
+        "surface": cfg.surface.source, "georef_mode": georef_mode(batch),
+        "georef_decision": getattr(batch, "georef_decision", None), "z_calibration": z,
         "aggregate": {"eps_m": cfg.aggregate.eps_m, "min_samples": cfg.aggregate.min_samples,
                       "min_views": cfg.aggregate.min_views, "weights": cfg.aggregate.weights},
         "filters": cfg.filters.__dict__, "size_ranges_m": cfg.size.ranges_m if cfg.size.enabled else None,

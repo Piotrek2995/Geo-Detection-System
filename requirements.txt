@@ -16,3 +16,11 @@ PyYAML>=6.0
 
 # Mapa podglądowa
 folium>=0.17.0
+
+# GUI (streamlit run app/main.py albo start_gui.bat)
+streamlit>=1.50.0
+streamlit-folium>=0.25.0
+plotly>=5.20.0
+pandas>=2.2.0
+# Zrzuty ekranu dokumentacji (scripts/gui_screenshots.py), opcjonalnie:
+#   pip install playwright && python -m playwright install chromium

@@ -517,7 +517,7 @@ def make_map(rep: ReferenceReport, runner, path: Path) -> Path:
     t = Transformer.from_crs(2180, 4326, always_xy=True)
     lat, lon = rep.spec["latlon"]
     m = folium.Map(location=[lat, lon], zoom_start=21, max_zoom=23, tiles=None)
-    add_basemaps(m)
+    add_basemaps(m, buildings=True)
     ref = folium.FeatureGroup("GT i start", show=True)
     folium.CircleMarker([lat, lon], radius=7, color=GREEN, fill=True, fill_opacity=1,
                         tooltip="GT piłki (Google Maps)").add_to(ref)

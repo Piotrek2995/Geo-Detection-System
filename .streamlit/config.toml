@@ -1,0 +1,19 @@
+# Motyw GUI w kolorach Wydzialu Geodezji i Kartografii PW (glowny #004A6B)
+[theme]
+base = "light"
+primaryColor = "#004A6B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EEF3F6"
+textColor = "#1B2A33"
+font = "sans serif"
+
+[server]
+headless = true
+runOnSave = false
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

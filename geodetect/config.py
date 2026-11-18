@@ -75,6 +75,17 @@ class DetectConfig:
     detections_csv: Optional[Path] = None
     manual_class: str = "manual"
     manual_box_px: float = 6.0
+    # Modele otwartego slownika (YOLOE, YOLO-World): klasy z promptu zamiast model.names.
+    # prompt_text: nazwy/opisy szukanych obiektow (np. ["soccer ball"]) — staja sie klasami.
+    # visual_prompt_*: prompt wizualny YOLOE — boxy obiektu na jednym zdjeciu wzorcowym
+    # (x1, y1, x2, y2 px) i nazwa klasy kazdego boxa; ma pierwszenstwo przed promptem tekstowym.
+    prompt_text: Optional[list[str]] = None
+    visual_prompt_image: Optional[Path] = None
+    visual_prompt_boxes: Optional[list[list[float]]] = None
+    visual_prompt_classes: Optional[list[str]] = None
+
+    def uses_visual_prompt(self) -> bool:
+        return bool(self.visual_prompt_image and self.visual_prompt_boxes)
 
     def class_list(self) -> Optional[list[str]]:
         """None = wszystkie klasy."""
@@ -256,7 +267,8 @@ class QcConfig:
     rotation_bad_deg: float = 5.0
 
 
-GEOREF_MODES = ("gps_only", "similarity_nmpt")
+# auto: kontrola jakosci wariantu gps_only decyduje, czy wyrownac do NMPT (qc.auto_georef_choice)
+GEOREF_MODES = ("auto", "gps_only", "similarity_nmpt")
 
 
 @dataclass
@@ -426,6 +438,37 @@ class PipelineConfig:
     def to_dict(self) -> dict[str, Any]:
         return _to_plain(self)
 
+    def save(self, path: Path | str) -> Path:
+        """Zapis YAML; sciezki pod katalogiem pliku zapisywane wzglednie (przenosny preset)."""
+        import yaml
+        path = Path(path)
+        base = path.resolve().parent
+
+        def rel(v):
+            if isinstance(v, dict):
+                return {k: rel(x) for k, x in v.items()}
+            if isinstance(v, list):
+                return [rel(x) for x in v]
+            return v
+        data = self.to_dict()
+
+        def relpaths(d: dict, cls) -> None:
+            for f in fields(cls):
+                v = d.get(f.name)
+                if f.name in _PATH_FIELDS and isinstance(v, str):
+                    p = Path(v)
+                    if p.is_absolute():
+                        try:
+                            d[f.name] = p.resolve().relative_to(base).as_posix()
+                        except ValueError:
+                            d[f.name] = p.as_posix()
+                elif f.name in _NESTED and isinstance(v, dict):
+                    relpaths(v, _NESTED[f.name])
+        relpaths(data, PipelineConfig)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(rel(data), allow_unicode=True, sort_keys=False), encoding="utf-8")
+        return path
+
     def excluded_images(self) -> set[str]:
         """Zdjecia wylaczone z rekonstrukcji i przetwarzania (zdjecie startowe z ziemi)."""
         return {self.z_anchor.start.image} if self.z_anchor.start.image else set()
@@ -451,12 +494,13 @@ class PipelineConfig:
         self.eval.labels_dir = res(self.eval.labels_dir)
         self.detect.manual_csv = res(self.detect.manual_csv)
         self.detect.detections_csv = res(self.detect.detections_csv)
+        self.detect.visual_prompt_image = res(self.detect.visual_prompt_image)
 
 
 # Pola typu Path (takze Optional[Path]) — konwertowane ze stringow przy wczytywaniu.
 _PATH_FIELDS = {"photos_dir", "odm_dir", "model_path", "output_dir", "raster_path", "cache_path",
                 "odm_dtm", "odm_dsm", "nmt_dir", "nmpt_dir", "sam_model", "mask_cache_dir", "labels_dir",
-                "manual_csv", "detections_csv"}
+                "manual_csv", "detections_csv", "visual_prompt_image"}
 _NESTED = {"tiling": TilingConfig, "dem": DemConfig, "detect": DetectConfig, "raycast": RaycastConfig,
            "filters": FilterConfig, "aggregate": AggregateConfig, "z_anchor": ZAnchorConfig,
            "surface": SurfaceConfig, "point": PointConfig, "eval": EvalConfig,

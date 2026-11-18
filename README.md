@@ -3,7 +3,7 @@
 Praca inżynierska (WGiK PW): *Wykorzystanie algorytmów widzenia maszynowego w automatycznej
 klasyfikacji i georeferencji wybranych obiektów na zdjęciach UAV*.
 
-System wykrywa obiekty (namioty, ludzie) na zdjęciach z drona modelem YOLO i wyznacza ich
+System wykrywa wybrane obiekty na zdjęciach z drona modelem YOLO i wyznacza ich
 współrzędne metodą ray castingu. Promień biegnie z kamery przez piksel obiektu i jest
 przecinany z modelem wysokościowym (NMT z GUGiK lub lokalny GeoTIFF NMT/NMPT). Orientacja
 (EO) i kalibracja (IO) kamery pochodzą z rekonstrukcji SfM w OpenDroneMap, bo Potensic
@@ -23,6 +23,18 @@ python chech_env.py        # sprawdza CUDA i klasy modelu
 ODM (Docker) uruchamia się raz na lot. Instrukcja jest w [ODM.md](ODM.md). Potrzebne pliki
 wynikowe to `odm_project/opensfm/reconstruction.json`, `reference_lla.json`
 i `odm_project/odm_report/shots.geojson`.
+
+## Interfejs graficzny (GUI)
+
+```powershell
+start_gui.bat                     # albo: streamlit run app/main.py
+```
+
+Przeglądarka otwiera http://localhost:8501. Strony: Projekt → Detekcja → Georeferencja → Uruchom
+→ Wyniki. GUI wywołuje wyłącznie API pakietu `geodetect` (te same obliczenia co CLI). Ustawienia
+zapisuje jako zwykły config YAML, a presety detekcji są w `presets/`. Instrukcja dla użytkownika
+jest w [docs/instrukcja_uzytkownika.md](docs/instrukcja_uzytkownika.md). Tryb badawczy
+(strona Eksperymenty) włącza się w Ustawieniach albo zmienną `GEODETECT_RESEARCH=1`.
 
 ## Uruchomienie
 
@@ -482,6 +494,12 @@ geodetect/
   diagnostics.py residua wzdłuż/w poprzek promienia, multiview_check (skan z_offset)
   experiments.py eksperymenty z YAML: warianty, cache detekcji, metryki, summary.md
   expplots.py   wykresy i podglądy eksperymentów
+  runs.py       lista przebiegów, porównanie, mapa wyników (API dla GUI)
+  photos.py     skan zdjęć (GPS, wysokość), wykrycie zdjęcia startowego
+  odmrun.py     uruchamianie ODM w Dockerze (status, postęp, przerwanie)
+  coverage.py   dostępność powierzchni: REST GUGiK, pokrycie arkuszy NMT/NMPT
+app/            GUI Streamlit: main.py, state.py (stan i walidacja, bez streamlit), ui.py, views/
+presets/        presety detekcji GUI (YAML)
 main.py         CLI
 config.yaml     przykładowa konfiguracja
 legacy/         zamrożony prototyp z raportu 1 (do porównań)

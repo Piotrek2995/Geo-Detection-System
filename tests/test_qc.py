@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from geodetect.config import QcConfig
-from geodetect.qc import (BAD, NA, OK, REC_7P, REC_BASE, REC_CALIB, WARN, check_baseline, check_focal,
+from geodetect.qc import (BAD, INFO, NA, OK, REC_7P, REC_BASE, REC_CALIB, WARN, check_baseline, check_focal,
                           check_surface, check_surface_modes, check_vertical_scale, expected_focal_exif,
                           fit_plane, summarize, surface_stats)
 
@@ -37,7 +37,7 @@ class QcTest(unittest.TestCase):
     def test_focal(self):
         self.assertAlmostEqual(expected_focal_exif(13, 2560, 1440), 0.3447, places=4)
         # vs EXIF: najwyzej ostrzezenie (EXIF nie uwzglednia kadrowania)
-        self.assertEqual(check_focal(0.528, self.cfg, 13, 2560, 1440).status, WARN)
+        self.assertEqual(check_focal(0.528, self.cfg, 13, 2560, 1440).status, INFO)
         self.assertEqual(check_focal(0.36, self.cfg, 13, 2560, 1440).status, OK)
         ref = QcConfig(camera_focal=0.528)
         self.assertEqual(check_focal(0.374, ref).status, BAD)
