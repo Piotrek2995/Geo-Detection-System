@@ -43,6 +43,8 @@ class PipelineContext:
     alignment: Optional[object] = None      # align.GeorefAlignment (georef.mode=similarity_nmpt)
     qc: Optional[object] = None             # qc.QcReport (kontrola jakosci rekonstrukcji)
     georef_decision: Optional[str] = None   # georef.mode "auto": dlaczego wybrano dany tryb
+    alternative: Optional["PipelineContext"] = None   # auto bez deformacji: wariant 7p do porownania
+                                                      # w run_batch (te same detekcje, z cache)
 
     @property
     def ray_surface(self) -> Surface:
@@ -96,6 +98,23 @@ class ImageResult:
     misses: list[Detection] = field(default_factory=list)  # bez przeciecia z DEM
 
 
+class _MemoDetector:
+    """Detektor z pamiecia wynikow per zdjecie: drugi wariant georeferencji bez ponownej detekcji."""
+
+    def __init__(self, detector):
+        self.detector, self.cache = detector, {}
+
+    @property
+    def names(self):
+        return getattr(self.detector, "names", None)
+
+    def detect(self, image_path):
+        key = str(image_path)
+        if key not in self.cache:
+            self.cache[key] = self.detector.detect(image_path)
+        return self.cache[key]
+
+
 def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
                   dem: Optional[DemSampler] = None, reconstruction: Optional[OdmReconstruction] = None,
                   surface: Optional[Surface] = None) -> PipelineContext:
@@ -104,25 +123,35 @@ def build_context(config: PipelineConfig, detector: Optional[Detector] = None,
     config.point.validate()
     dem = dem if dem is not None else resolve_dem(config.dem)
     g = georeference(config, dem, reconstruction)
-    rec, base_frame, z_cal, alignment, qc = g.reconstruction, g.base_frame, g.z_calibration, g.alignment, g.qc
+    if detector is None:
+        detector = make_detector(config.model_path, config.detect)
+    if g.alternative is not None:
+        detector = _MemoDetector(detector)
+    ctx = _context(g, dem, detector, surface)
+    if g.alternative is not None:
+        same = surface is not None or ctx.config.surface.source != "odm_dsm"
+        ctx.alternative = _context(g.alternative, dem, detector, ctx.surface if same else None)
+    return ctx
+
+
+def _context(g: "Georeference", dem: DemSampler, detector, surface: Optional[Surface]) -> PipelineContext:
+    rec, base_frame, z_cal, alignment = g.reconstruction, g.base_frame, g.z_calibration, g.alignment
     config = g.config            # "auto" -> faktycznie uzyty tryb (raport, eksport)
     if alignment is not None and config.surface.source == "odm_dsm" and surface is None:
         surface = alignment.dsm_surface()
-    cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
-                     for n in rec.image_names])
     if surface is None:
+        cams = np.array([base_frame.enu_to_puwg92(*rec.camera(n)[1].C_enu)[:2]
+                         for n in rec.image_names])
         surface = build_surface(config, area_bounds_2180(config, cams), ref_dem=dem)
     log.info("Powierzchnia ray castingu: %s (uklad wysokosci %s, krok %.2f m)", surface.name,
              surface.vertical, config.raycast.step_for(surface.resolution_m))
-    if detector is None:
-        detector = make_detector(config.model_path, config.detect)
     names = getattr(detector, "names", None)
     if names:   # nazwy klas z konfiguracji musza istniec w modelu
         validate_class_names(config.point.per_class, names.values(), "point.per_class")
     ctx = PipelineContext(config, dem, rec, base_frame.with_z_offset(z_cal.offset, z_cal.tilt),
                           z_cal, detector, surface)
     ctx.alignment = alignment
-    ctx.qc = qc
+    ctx.qc = g.qc
     ctx.georef_decision = g.decision
     return ctx
 
@@ -139,6 +168,7 @@ class Georeference:
     mode: str = "gps_only"                 # tryb faktycznie uzyty (po rozstrzygnieciu "auto")
     decision: Optional[str] = None         # uzasadnienie wyboru w trybie "auto"
     config: Optional[PipelineConfig] = None  # config z georef.mode = mode (do kontekstu / eksportu)
+    alternative: Optional["Georeference"] = None   # auto bez deformacji: wariant 7p (porownanie po detekcji)
 
 
 def georeference(config: PipelineConfig, dem: Optional[DemSampler] = None,
@@ -160,12 +190,14 @@ def georeference(config: PipelineConfig, dem: Optional[DemSampler] = None,
     mode, decision = config.georef.mode, None
     run = config.qc.enabled if with_qc is None else with_qc
     qc = None
+    compare = False
     if mode == "auto":
-        qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, None, dem)
         from .qc import auto_georef_choice
-        mode, decision = auto_georef_choice(qc)
+        qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, None, dem)
+        mode, decision = auto_georef_choice(qc, config.qc)
+        compare = mode is None           # bez deformacji: oba warianty, wybor w run_batch
         log.info("Georeferencja automatyczna: %s", decision)
-    if mode == "similarity_nmpt":
+    if mode == "similarity_nmpt" or compare:
         # Wyrownanie 7p do NMPT: z_anchor daje tylko start (tz). W ukladzie wyrownanym
         # H [m npm] = h (tz zawiera z_offset), wiec ramka ma z_offset = 0.
         from .align import align_reconstruction
@@ -175,18 +207,33 @@ def georeference(config: PipelineConfig, dem: Optional[DemSampler] = None,
             if config.georef.mode != "auto":
                 raise
             log.warning("Wyrownanie do NMPT niemozliwe (%s) — standard gps_only", exc)
-            mode, decision = "gps_only", f"Wybrano standard (GPS drona), bo wyrównanie do NMPT się nie powiodło ({exc})."
-        else:
-            rec = alignment.reconstruction
-            z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
+            mode, compare = "gps_only", False
+            decision = f"Wybrano standard (GPS drona), bo wyrównanie do NMPT się nie powiodło ({exc})."
+    if compare:
+        from .qc import REC_7P, REC_AUTO
+        qc7 = _run_qc(config, rec_gps, base_frame, z_cal_gps, alignment, dem)
+        alt = Georeference(alignment.reconstruction, base_frame, ZCalibration(0.0, "similarity_nmpt",
+                           stats=alignment.stats()), alignment, qc7, z_cal_gps, "similarity_nmpt", decision,
+                           _with_mode(config, "similarity_nmpt"))
+        qc = qc.without(REC_7P, REC_AUTO) if qc is not None else None   # porownanie i tak nastapi
+        return Georeference(rec, base_frame, z_cal, None, qc, z_cal_gps, "gps_only", decision,
+                            _with_mode(config, "gps_only"), alternative=alt)
+    if mode == "similarity_nmpt":
+        rec = alignment.reconstruction
+        z_cal = ZCalibration(0.0, "similarity_nmpt", stats=alignment.stats())
     if run and (qc is None or alignment is not None):
         qc = _run_qc(config, rec_gps, base_frame, z_cal_gps, alignment, dem)
-    used = config
-    if config.georef.mode != mode:
-        import copy
-        used = copy.deepcopy(config)
-        used.georef.mode = mode
-    return Georeference(rec, base_frame, z_cal, alignment, qc, z_cal_gps, mode, decision, used)
+    return Georeference(rec, base_frame, z_cal, alignment, qc, z_cal_gps, mode, decision,
+                        _with_mode(config, mode))
+
+
+def _with_mode(config: PipelineConfig, mode: str) -> PipelineConfig:
+    if config.georef.mode == mode:
+        return config
+    import copy
+    used = copy.deepcopy(config)
+    used.georef.mode = mode
+    return used
 
 
 def check_reconstruction(config: PipelineConfig, dem: Optional[DemSampler] = None) -> Georeference:

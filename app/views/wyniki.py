@@ -52,7 +52,7 @@ if par.get("georef_decision"):
 
 # ───────────── tabela + mapa ─────────────
 df = pd.DataFrame([{
-    "nr": o["object_id"], "klasa": lab(o["class"]), "status": S.STATUS_PL.get(o.get("status"), o.get("status")),
+    "nr": o["object_id"] + 1, "klasa": lab(o["class"]), "status": S.STATUS_PL.get(o.get("status"), o.get("status")),
     "widoki": o.get("n_views"), "pewność": o.get("mean_conf"), "flaga": bool(o.get("flags")),
 } for o in run.objects])
 
@@ -80,10 +80,10 @@ with col_tab:
     st.caption("Kliknij wiersz albo punkt na mapie, aby zobaczyć szczegóły.")
     rows = ev.selection.rows if ev is not None else []
     if rows:
-        selected = int(view.iloc[rows[0]]["nr"])
+        selected = int(view.iloc[rows[0]]["nr"]) - 1
         st.session_state.sel_obj = selected
 with col_map:
-    ids = set(view["nr"]) if len(view) else set()
+    ids = {int(n) - 1 for n in view["nr"]} if len(view) else set()
     sub = type(run)(run.path, run.report, [o for o in run.objects if o["object_id"] in ids],
                     [d for d in run.detections if d.get("object_id") in ids or d.get("object_id") is None],
                     run.files)
@@ -99,7 +99,7 @@ with col_map:
 # ───────────── obiekt ─────────────
 obj = run.object(selected) if selected is not None else None
 if obj is not None:
-    st.subheader(f"Obiekt {obj['object_id']}: {lab(obj['class'])}")
+    st.subheader(f"Obiekt {obj['object_id'] + 1}: {lab(obj['class'])}")
     facts = [S.STATUS_PL.get(obj.get("status"), obj.get("status")), f"widoki: {obj.get('n_views')}",
              f"pewność {obj['mean_conf']:.2f}" if obj.get("mean_conf") is not None else None,
              f"rozmiar {obj['size_m']:.1f} m" if obj.get("size_m") is not None else None,

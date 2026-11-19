@@ -453,6 +453,9 @@ def apply_action(cfg: PipelineConfig, action: str) -> str:
     if action == "georef_nmpt":
         cfg.georef.mode = "similarity_nmpt"
         return "Ustawiono wyrównanie do NMPT."
+    if action == "georef_auto":
+        cfg.georef.mode = "auto"
+        return "Ustawiono automatyczny wybór georeferencji."
     raise ValueError(f"Nieznana akcja {action!r}")
 
 
@@ -691,7 +694,8 @@ def comparison_rows(matches, a, b, labels: Optional[dict] = None) -> list[dict]:
     rows = []
     for m in sorted(matches, key=lambda m: (m.shift_m is None, -(m.shift_m or 0))):
         rows.append({"klasa": labels.get(m.cls, m.cls),
-                     "obiekt A": m.a_id, "obiekt B": m.b_id,
+                     "obiekt A": None if m.a_id is None else m.a_id + 1,     # numeracja od 1
+                     "obiekt B": None if m.b_id is None else m.b_id + 1,
                      "przesunięcie [m]": None if m.shift_m is None else round(m.shift_m, 2),
                      "różnica wysokości [m]": None if m.dh_m is None else round(m.dh_m, 2),
                      "uwagi": "" if m.a_id is not None and m.b_id is not None else

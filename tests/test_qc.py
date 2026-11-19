@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from geodetect.config import QcConfig
-from geodetect.qc import (BAD, INFO, NA, OK, REC_7P, REC_BASE, REC_CALIB, WARN, check_baseline, check_focal,
+from geodetect.qc import (BAD, INFO, NA, OK, REC_7P, REC_AUTO, REC_BASE, REC_CALIB, WARN, check_baseline, check_focal,
                           check_surface, check_surface_modes, check_vertical_scale, expected_focal_exif,
                           fit_plane, summarize, surface_stats)
 
@@ -74,11 +74,13 @@ class QcTest(unittest.TestCase):
         self.assertLess(b["nmad_plane"], 0.4)                         # ksztalt zgodny, tylko przechyl
         self.assertGreater(b["nmad_raw"], 1.0)
         surf, tilt = check_surface_modes(b, b, self.cfg, mode="gps_only + dem_alignment")
-        self.assertEqual((surf.status, tilt.status), (OK, WARN))    # dobry lot bez 7p: ostrzezenie
+        self.assertEqual((surf.status, tilt.status), (OK, INFO))    # dobry lot bez 7p: informacja
         surf, tilt = check_surface_modes(b, a, self.cfg, mode="similarity_nmpt")
         self.assertEqual((surf.status, tilt.status), (OK, OK))
         self.assertRegex(tilt.text, r"3\.\d\d° → 0\.\d\d°")
-        bad = surface_stats(xy, np.tan(np.radians(9)) * xy[:, 0] + noise)
+        warn = surface_stats(xy, np.tan(np.radians(9)) * xy[:, 0] + noise)     # deformacja: > 8 deg
+        self.assertEqual(check_surface_modes(warn, warn, self.cfg)[1].status, WARN)
+        bad = surface_stats(xy, np.tan(np.radians(16)) * xy[:, 0] + noise)
         self.assertEqual(check_surface_modes(bad, bad, self.cfg)[1].status, BAD)
         self.assertEqual(check_surface_modes(None, {"n": 3}, self.cfg)[0].status, NA)
 
@@ -87,8 +89,12 @@ class QcTest(unittest.TestCase):
         xy = rng.uniform(-30, 30, (500, 2))
         st = surface_stats(xy, np.tan(np.radians(4)) * xy[:, 0] + rng.normal(0, 0.2, 500))
         checks = check_surface_modes(st, st, self.cfg)
-        self.assertTrue(summarize(checks).recommendations[0].startswith(REC_7P))
+        # male pochylenie: nie zalecamy 7p wprost, tylko porownanie wariantow (tryb auto)
+        self.assertEqual(summarize(checks).recommendations, [REC_AUTO])
         self.assertEqual(summarize(checks, aligned=True).recommendations, [])
+        st = surface_stats(xy, np.tan(np.radians(10)) * xy[:, 0] + rng.normal(0, 0.2, 500))
+        checks = check_surface_modes(st, st, self.cfg)
+        self.assertTrue(summarize(checks).recommendations[0].startswith(REC_7P))
 
     def test_baseline(self):
         g = np.array([[0, 0], [80, 0], [80, 60], [0, 60]], float)

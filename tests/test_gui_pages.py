@@ -115,8 +115,9 @@ class GuiPagesSmokeTest(unittest.TestCase):
         at = self.page("views/wyniki.py", sel_obj=0,
                        result_dir=str(Path(self.tmp.name) / "out" / "runs" / "2026-01-01_100000"))
         texts = " ".join(m.value for m in at.markdown)
-        self.assertIn("Obiekt 0: człowiek", [s.value for s in at.subheader])
-        self.assertIn("Na stronie Georeferencja wybierz wyrównanie do NMPT.", texts)
+        self.assertIn("Obiekt 1: człowiek", [s.value for s in at.subheader])
+        self.assertIn("Na stronie Georeferencja wybierz tryb automatyczny", texts)   # stary raport: 3.9° to informacja
+        self.assertIn("Obiekt 1", [s.value for s in at.subheader][0])
         self.assertNotIn("similarity_nmpt", texts)
 
 

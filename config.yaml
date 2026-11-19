@@ -177,10 +177,15 @@ z_anchor:
 # ma poprawna geometrie (skala pionowa ~1), a georeferencja odbiega od NMPT. Przy zle
 # skalibrowanej kamerze 7p tylko kompensuje deformacje (docs/eksperyment_pilka.md, 5.6-5.7).
 georef:
-  mode: gps_only                # gps_only | similarity_nmpt
+  mode: gps_only                # auto | gps_only | similarity_nmpt
   sigma_gps_xy_m: 3.0           # prior XY kamer z EXIF (takze do oceny bazy kamer w qc)
   use_baro_prior: true          # wysokosci barometryczne (gdy z_anchor.start)
   sigma_baro_m: 0.5
+  # mode auto: bez deformacji porownanie obu wariantow na tych samych detekcjach; 7p tylko gdy
+  # rozrzut obiektow (>= auto_min_views widokow) spada o > auto_spread_gain i reszty DSM-NMPT nie rosna
+  auto_min_views: 3
+  auto_spread_gain: 0.20
+  auto_resid_tol_m: 0.05
 
 # Kontrola jakosci rekonstrukcji (geodetect/qc.py): wynik w podsumowaniu batcha.
 qc:
@@ -192,8 +197,11 @@ qc:
   # zgodnosc z NMPT liczona dla AKTYWNEJ georeferencji (z_anchor / 7p), obok wartosci gps_only
   surface_nmad_warn_m: 0.75     # NMAD(DSM ODM - NMPT) po usunieciu plaszczyzny (ksztalt)
   surface_nmad_bad_m: 1.5
-  tilt_warn_deg: 2.0            # pochylenie plaszczyzny reszt (przechyl modelu)
-  tilt_bad_deg: 6.0
+  tilt_info_deg: 2.0            # pochylenie plaszczyzny reszt (przechyl modelu): > info -> informacja
+  tilt_warn_deg: 8.0            # > warn: deformacja (georef auto -> 7p bez porownania)
+  tilt_bad_deg: 15.0
+  deform_scale_min: 0.85        # skala pionowa poza zakresem: deformacja (georef auto -> 7p)
+  deform_scale_max: 1.15
   core_radius_m: 30.0           # tylko DSM <= tyle od kamer (krance DSM ODM ekstrapolowane)
   rotation_warn_deg: 2.0        # sqrt(2) * sigma_GPS / rozpietosc kamer
   rotation_bad_deg: 5.0

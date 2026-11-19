@@ -189,7 +189,8 @@ def qc_panel(rep, key: str, extra_details: Optional[list[str]] = None, rerun: bo
     for i, (text, action) in enumerate(v["actions"]):
         c1, c2 = st.columns([4, 1], vertical_alignment="center")
         c1.markdown(f"**Zalecenie:** {text}")
-        if action == "georef_nmpt" and cfg().georef.mode != "similarity_nmpt":
+        target = {"georef_nmpt": "similarity_nmpt", "georef_auto": "auto"}.get(action)
+        if target and cfg().georef.mode != target:
             label = "Zastosuj i uruchom ponownie" if rerun else "Zastosuj"
             if c2.button(label, key=f"{key}_act_{i}", width="stretch"):
                 msg = S.apply_action(cfg(), action)

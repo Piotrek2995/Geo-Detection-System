@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import dataclasses
 import html
 import json
 import logging
@@ -615,7 +616,10 @@ def run_parameters(batch: BatchResult) -> dict:
         "iou": d.iou, "imgsz": d.imgsz, "tiling": bool(getattr(d.tiling, "enabled", False)),
         "point_method": cfg.point.method, "point_per_class": cfg.point.per_class,
         "surface": cfg.surface.source, "georef_mode": georef_mode(batch),
-        "georef_decision": getattr(batch, "georef_decision", None), "z_calibration": z,
+        "georef_decision": getattr(batch, "georef_decision", None),
+        "georef_comparison": (dataclasses.asdict(batch.georef_comparison)
+                              if getattr(batch, "georef_comparison", None) is not None else None),
+        "z_calibration": z,
         "aggregate": {"eps_m": cfg.aggregate.eps_m, "min_samples": cfg.aggregate.min_samples,
                       "min_views": cfg.aggregate.min_views, "weights": cfg.aggregate.weights},
         "filters": cfg.filters.__dict__, "size_ranges_m": cfg.size.ranges_m if cfg.size.enabled else None,

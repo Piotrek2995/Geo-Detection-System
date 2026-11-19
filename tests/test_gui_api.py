@@ -4,6 +4,7 @@ config.save, detect (prompt). Bez sieci, Dockera i GPU (atrapy runner/popen/get)
 import io
 import json
 import logging
+import math
 import subprocess
 import tempfile
 import unittest
@@ -15,7 +16,8 @@ import numpy as np
 from geodetect import coverage, odmrun, photos, runs
 from geodetect.config import DetectConfig, PipelineConfig
 from geodetect.detect import is_open_vocab_model, prompt_class_names
-from geodetect.qc import (BAD, INFO, OK, REC_7P, REC_BASE, WARN, QcCheck, QcReport, auto_georef_choice,
+from geodetect.qc import (BAD, INFO, OK, REC_7P, REC_AUTO, REC_BASE, WARN, QcCheck, QcReport, auto_georef_choice,
+                          compare_georef,
                           explain, explain_report, summarize)
 from tests.test_surface import write_asc
 
@@ -295,14 +297,38 @@ class QcGuiTest(unittest.TestCase):
         self.assertIn(("Na stronie Georeferencja wybierz wyrównanie do NMPT.", "georef_nmpt"), v["actions"])
         self.assertIn("3.9°", explain(rep.check("tilt")))
 
-    def test_auto_choice(self):
+    def test_auto_choice_stage1(self):
         self.assertEqual(auto_georef_choice(None)[0], "gps_only")
         ok = self._rep(QcCheck("tilt", OK, 0.4, ""), QcCheck("surface", OK, 0.3, ""))
-        self.assertEqual(auto_georef_choice(ok)[0], "gps_only")
-        tilted = self._rep(QcCheck("tilt", WARN, 3.9, ""), QcCheck("surface", OK, 0.3, ""))
+        self.assertIsNone(auto_georef_choice(ok)[0])                    # -> porownanie wariantow
+        mild = self._rep(QcCheck("tilt", INFO, 3.9, ""), QcCheck("vertical_scale", OK, 0.97, ""))
+        self.assertIsNone(auto_georef_choice(mild)[0])
+        squashed = self._rep(QcCheck("vertical_scale", BAD, 0.68, ""), QcCheck("tilt", INFO, 3.0, ""))
+        mode, why = auto_georef_choice(squashed)
+        self.assertEqual(mode, "similarity_nmpt")
+        self.assertIn("0.68", why)
+        tilted = self._rep(QcCheck("tilt", WARN, 14.0, ""))
         mode, why = auto_georef_choice(tilted)
         self.assertEqual(mode, "similarity_nmpt")
-        self.assertIn("3.9°", why)
+        self.assertIn("14.0°", why)
+
+    def test_mild_tilt_recommends_auto_not_7p(self):
+        rep = self._rep(QcCheck("tilt", INFO, 3.9, ""), QcCheck("surface", OK, 0.3, ""))
+        self.assertEqual(rep.status, OK)
+        self.assertEqual(rep.recommendations, [REC_AUTO])
+        self.assertEqual(explain_report(rep)["actions"][0][1], "georef_auto")
+        self.assertIn("lekko pochylony", explain(rep.check("tilt")))
+
+    def test_from_dict_legacy_tilt_warning(self):
+        old = {"status": WARN, "recommendations": [REC_7P], "checks": [
+            {"name": "tilt", "status": WARN, "value": 3.9, "text": "", "details": {"mode": "gps_only"}},
+            {"name": "baseline", "status": WARN, "value": 3.2, "text": "", "details": {}}]}
+        rep = QcReport.from_dict(old)
+        self.assertEqual(rep.check("tilt").status, INFO)
+        self.assertEqual(rep.status, WARN)                              # baza nadal ostrzezeniem
+        self.assertEqual(rep.recommendations, [REC_AUTO])
+        self.assertEqual(QcReport.from_dict(rep.to_dict()).recommendations, [REC_AUTO])
+
 
     def test_from_dict_old_focal_warning_becomes_info(self):
         old = {"status": WARN, "recommendations": [], "checks": [
@@ -318,6 +344,54 @@ class QcGuiTest(unittest.TestCase):
         self.assertEqual(back.status, rep.status)
         self.assertEqual(back.check("tilt").details, {"a": 1})
         self.assertEqual(back.recommendations, rep.recommendations)
+
+
+class GeorefCompareTest(unittest.TestCase):
+    """Etap 2 reguly auto: rozrzut obiektow i reszty DSM - NMPT w obu wariantach."""
+    cfg = PipelineConfig().georef
+
+    def test_7p_increases_spread_keeps_standard(self):
+        c = compare_georef(0.38, 1.0, 2, 1.20, 0.45, self.cfg)
+        self.assertEqual(c.mode, "gps_only")
+        self.assertEqual(c.reason, "Wybrano standard: wyrównanie do NMPT zwiększyłoby rozrzut obiektów z 0.38 do 1.00 m.")
+
+    def test_7p_reduces_spread(self):
+        c = compare_georef(2.0, 0.6, 3, 1.5, 0.5, self.cfg)
+        self.assertEqual(c.mode, "similarity_nmpt")
+        self.assertIn("z 2.00 do 0.60 m", c.reason)
+
+    def test_small_gain_keeps_standard(self):
+        self.assertEqual(compare_georef(1.0, 0.85, 3, 1.0, 0.5, self.cfg).mode, "gps_only")   # 15% < 20%
+
+    def test_worse_residuals_keep_standard(self):
+        c = compare_georef(1.0, 0.5, 3, 0.40, 0.60, self.cfg)
+        self.assertEqual(c.mode, "gps_only")
+        self.assertIn("pogorszyłoby zgodność z NMPT", c.reason)
+
+    def test_no_objects_decided_by_residuals(self):
+        nan = float("nan")
+        self.assertEqual(compare_georef(nan, nan, 0, 1.6, 0.5, self.cfg).mode, "similarity_nmpt")
+        self.assertEqual(compare_georef(nan, nan, 0, 0.5, 0.48, self.cfg).mode, "gps_only")
+        self.assertEqual(compare_georef(nan, nan, 0, nan, nan, self.cfg).mode, "gps_only")
+
+    def test_multiview_spread(self):
+        from geodetect.batch import multiview_spread
+        o = lambda n, rms, ok=True: SimpleNamespace(confirmed=ok, n_views=n, rms_m=rms)   # noqa: E731
+        s, n = multiview_spread([o(26, 0.4), o(2, 5.0), o(4, 1.0, ok=False), o(3, 0.8)], 3)
+        self.assertEqual(n, 2)
+        self.assertAlmostEqual(s, math.sqrt((26 * 0.16 + 3 * 0.64) / 29))
+        self.assertEqual(multiview_spread([o(2, 1.0)], 3)[1], 0)
+
+    def test_choose_variant_uses_qc_residuals(self):
+        from geodetect.batch import choose_georef_variant
+        o = lambda rms: [SimpleNamespace(confirmed=True, n_views=10, rms_m=rms)]          # noqa: E731
+        qc = lambda nmad: QcReport([QcCheck("surface", OK, 0.3, "", {"after": {"nmad_raw": nmad}})], OK, [])  # noqa: E731
+        cfg = PipelineConfig()
+        c = choose_georef_variant(cfg, o(0.38), o(1.0), qc(1.2), qc(0.45))
+        self.assertEqual((c.mode, c.n_objects), ("gps_only", 1))
+        c = choose_georef_variant(cfg, o(3.0), o(0.9), qc(2.0), qc(0.5))
+        self.assertEqual(c.mode, "similarity_nmpt")
+        self.assertAlmostEqual(c.nmad_7p, 0.5)
 
 
 class ConfigDetectGuiTest(unittest.TestCase):
@@ -374,33 +448,40 @@ class GeorefAutoTest(unittest.TestCase):
             g = pipeline.georeference(cfg, dem=object(), reconstruction=rec)
         return cfg, g, qc_calls
 
-    def test_auto_keeps_gps_when_model_ok(self):
-        ok = summarize([QcCheck("tilt", OK, 0.4, ""), QcCheck("surface", OK, 0.3, "")])
-        cfg, g, calls = self.run_auto(ok)
-        self.assertEqual(g.mode, "gps_only")
-        self.assertIs(g.qc, ok)
-        self.assertEqual(calls, [None])                       # QC liczone raz
-        self.assertEqual(g.config.georef.mode, "gps_only")
+    def test_auto_compares_when_no_deformation(self):
+        mild = summarize([QcCheck("tilt", INFO, 3.9, ""), QcCheck("surface", OK, 0.3, "")])
+        self.assertEqual(mild.recommendations, [REC_AUTO])
+        cfg, g, calls = self.run_auto(mild)
+        self.assertEqual(g.mode, "gps_only")                  # wariant glowny: standard
+        self.assertIsNotNone(g.alternative)                   # 7p do porownania w run_batch
+        self.assertEqual(g.alternative.mode, "similarity_nmpt")
+        self.assertEqual(g.alternative.reconstruction, "REC_7P")
+        self.assertEqual(g.alternative.qc, "QC_PO_7P")
+        self.assertEqual(g.alternative.config.georef.mode, "similarity_nmpt")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(g.qc.recommendations, [])            # bez "wybierz tryb auto" w trybie auto
+        self.assertEqual(mild.recommendations, [REC_AUTO])    # raport z cache QC nienaruszony
         self.assertEqual(cfg.georef.mode, "auto")             # config uzytkownika bez zmian
-        self.assertIn("standard", g.decision)
+        self.assertIn("porównanie", g.decision)
 
-    def test_auto_aligns_tilted_model(self):
-        tilted = summarize([QcCheck("tilt", WARN, 3.9, ""), QcCheck("surface", OK, 0.3, "")])
-        cfg, g, calls = self.run_auto(tilted)
+    def test_auto_aligns_deformed_model(self):
+        squashed = summarize([QcCheck("vertical_scale", BAD, 0.68, ""), QcCheck("tilt", WARN, 14.0, "")])
+        cfg, g, calls = self.run_auto(squashed)
         self.assertEqual(g.mode, "similarity_nmpt")
+        self.assertIsNone(g.alternative)
         self.assertEqual(g.reconstruction, "REC_7P")
         self.assertEqual(g.z_calibration.offset, 0.0)
         self.assertEqual(g.qc, "QC_PO_7P")                    # raport po wyrownaniu
         self.assertEqual(g.config.georef.mode, "similarity_nmpt")
-        self.assertIn("3.9°", g.decision)
+        self.assertIn("0.68", g.decision)
 
     def test_auto_falls_back_without_nmpt(self):
-        tilted = summarize([QcCheck("tilt", BAD, 7.0, "")])
+        mild = summarize([QcCheck("tilt", INFO, 3.0, "")])
         with self.assertLogs("geodetect.pipeline", "WARNING"):
-            cfg, g, calls = self.run_auto(tilted, FileNotFoundError("brak arkuszy NMPT"))
+            cfg, g, calls = self.run_auto(mild, FileNotFoundError("brak arkuszy NMPT"))
         self.assertEqual(g.mode, "gps_only")
+        self.assertIsNone(g.alternative)
         self.assertIn("nie powiodło", g.decision)
-
 
 if __name__ == "__main__":
     unittest.main()

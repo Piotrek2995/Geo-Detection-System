@@ -258,8 +258,11 @@ class QcConfig:
     # reszty DSM ODM - NMPT liczone dla AKTYWNEJ georeferencji (z_anchor / 7p), "przed" = gps_only
     surface_nmad_warn_m: float = 0.75   # NMAD reszt po usunieciu plaszczyzny (zgodnosc ksztaltu)
     surface_nmad_bad_m: float = 1.5
-    tilt_warn_deg: float = 2.0          # pochylenie plaszczyzny reszt (przechyl modelu wzgledem NMPT)
-    tilt_bad_deg: float = 6.0
+    tilt_info_deg: float = 2.0          # pochylenie plaszczyzny reszt (przechyl modelu wzgledem NMPT):
+    tilt_warn_deg: float = 8.0          # > info: informacja (typowe przy gps_only), > warn: deformacja
+    tilt_bad_deg: float = 15.0          # (georef auto wybiera wtedy 7p bez porownania)
+    deform_scale_min: float = 0.85      # skala pionowa poza [min, max]: deformacja (auto -> 7p)
+    deform_scale_max: float = 1.15
     core_radius_m: float = 30.0         # tylko punkty DSM blizej niz tyle od najblizszej kamery
                                         # (krance DSM ODM sa ekstrapolowane: NMAD 2 m vs 0.5 m w srodku)
     sample_step_m: float = 1.0
@@ -267,7 +270,7 @@ class QcConfig:
     rotation_bad_deg: float = 5.0
 
 
-# auto: kontrola jakosci wariantu gps_only decyduje, czy wyrownac do NMPT (qc.auto_georef_choice)
+# auto: deformacja w QC -> 7p; inaczej porownanie rozrzutu obiektow w obu wariantach (qc.compare_georef)
 GEOREF_MODES = ("auto", "gps_only", "similarity_nmpt")
 
 
@@ -308,6 +311,12 @@ class GeorefConfig:
     weak_ratio: float = 2.0             # parametr "slabo wyznaczony z powierzchni", gdy
                                         # std(tylko powierzchnia) > weak_ratio * std(calosc)
     dsm_resolution_m: float = 0.2       # siatka DSM ODM po wyrownaniu (surface odm_dsm)
+    # mode "auto" bez wyraznej deformacji (qc.deform_*, qc.tilt_warn_deg): geometria liczona w obu
+    # wariantach na tych samych detekcjach; 7p tylko gdy zmniejsza rozrzut wielowidokowy obiektow
+    # potwierdzonych (>= auto_min_views) o > auto_spread_gain i nie pogarsza NMAD reszt DSM - NMPT
+    auto_min_views: int = 3
+    auto_spread_gain: float = 0.20
+    auto_resid_tol_m: float = 0.05      # tolerancja "nie pogarsza reszt"
 
     def validate(self) -> None:
         if self.mode not in GEOREF_MODES:

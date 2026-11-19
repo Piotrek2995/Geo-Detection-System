@@ -45,11 +45,22 @@ class RunData:
         return sorted(v, key=lambda d: (bool(d.get("touches_border")), -float(d.get("conf") or 0)))
 
 
+def _qc_status(qc: Optional[dict]) -> Optional[str]:
+    """Status QC przebiegu; stare raporty przeliczane wg biezacej reguly (QcReport.from_dict)."""
+    if not qc:
+        return None
+    from .qc import QcReport
+    try:
+        return QcReport.from_dict(qc).status
+    except (KeyError, TypeError, ValueError):
+        return qc.get("status")
+
+
 def _summary(path: Path, rep: dict) -> RunSummary:
     st, par = rep.get("statistics", {}), rep.get("parameters", {})
     return RunSummary(path, path.name, rep.get("created", ""), st.get("images_processed", 0),
                       st.get("objects", 0), st.get("confirmed", 0), st.get("flagged", 0),
-                      (rep.get("qc") or {}).get("status"), par.get("georef_mode"),
+                      _qc_status(rep.get("qc")), par.get("georef_mode"),
                       Path(par["model"]).name if par.get("model") else None)
 
 
@@ -193,7 +204,7 @@ def run_map(run: RunData, selected: Optional[int] = None, show_detections: bool 
             color=FLAG_COLOR if flagged else ("#111111" if sel else (colors[o["class"]] if single else "#ffffff")),
             weight=4 if sel else (3 if flagged else 2), dash_array="4 3" if single else None, fill=True,
             fill_color=SINGLE_VIEW_COLOR if single else colors[o["class"]], fill_opacity=0.55 if single else 1.0,
-            tooltip=_html.escape(f"#{o['object_id']} {labels.get(o['class'], o['class'])} [{o.get('status')}], "
+            tooltip=_html.escape(f"#{o['object_id'] + 1} {labels.get(o['class'], o['class'])} [{o.get('status')}], "
                                  f"{o.get('n_views')} widoków"
                                  + (f", {size:.1f} m" if isinstance(size, (int, float)) else "")
                                  + (f" — {', '.join(o['flags'])}" if flagged else "")),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -35,6 +36,7 @@ class BatchResult:
     config: Optional[PipelineConfig] = None    # nazwy wyswietlane / kolory klas w eksporcie
     qc: Optional[object] = None                # qc.QcReport (kontrola jakosci rekonstrukcji)
     georef_decision: Optional[str] = None      # uzasadnienie wyboru przy georef.mode "auto"
+    georef_comparison: Optional[object] = None # qc.GeorefComparison (auto: porownanie obu wariantow)
 
     @property
     def detections(self) -> list[GeoDetection]:
@@ -62,6 +64,26 @@ def _qc_report(ctx):
     from .qc import QcReport
     qc = getattr(ctx, "qc", None)
     return qc if isinstance(qc, QcReport) else None
+
+
+def multiview_spread(objects: list[AggregatedObject], min_views: int) -> tuple[float, int]:
+    """Rozrzut wielowidokowy [m]: RMS odleglosci widokow od pozycji obiektu, laczony po obiektach
+    potwierdzonych z >= min_views widokami (wagi = liczba widokow). (nan, 0) gdy brak obiektow."""
+    objs = [o for o in objects if o.confirmed and o.n_views >= min_views and math.isfinite(o.rms_m)]
+    if not objs:
+        return float("nan"), 0
+    n = sum(o.n_views for o in objs)
+    return math.sqrt(sum(o.n_views * o.rms_m ** 2 for o in objs) / n), len(objs)
+
+
+def choose_georef_variant(cfg: PipelineConfig, objs_std: list[AggregatedObject], objs_7p: list[AggregatedObject],
+                          qc_std, qc_7p):
+    """georef.mode auto, etap 2: qc.GeorefComparison dla wariantow standard i 7p."""
+    from .qc import compare_georef, surface_nmad
+    s_std, n_std = multiview_spread(objs_std, cfg.georef.auto_min_views)
+    s_7p, n_7p = multiview_spread(objs_7p, cfg.georef.auto_min_views)
+    n = min(n_std, n_7p)
+    return compare_georef(s_std, s_7p, n, surface_nmad(qc_std), surface_nmad(qc_7p), cfg.georef)
 
 
 def summary_text(batch: BatchResult) -> str:
@@ -156,11 +178,34 @@ def run_batch(cfg: PipelineConfig, ctx: Optional[PipelineContext] = None,
             skipped[name] = f"blad: {e}"
 
     save_dem_cache(ctx.dem)
+    objects = aggregate([gd for r in results for gd in r.detections], cfg.aggregate, cfg.size)
+    decision, comparison = getattr(ctx, "georef_decision", None), None
+    alt = getattr(ctx, "alternative", None)
+    if alt is not None:
+        # georef auto bez deformacji: geometria wariantu 7p na tych samych detekcjach (cache detektora)
+        alt.segmenter = alt.segmenter or ctx.segmenter
+        results_7p = []
+        for r in results:
+            if cancel is not None and cancel():
+                raise Cancelled("przerwano podczas porownania wariantow georeferencji")
+            results_7p.append(run_single(cfg, r.image_name, alt))
+        objects_7p = aggregate([gd for r in results_7p for gd in r.detections], cfg.aggregate, cfg.size)
+        comparison = choose_georef_variant(cfg, objects, objects_7p, _qc_report(ctx), _qc_report(alt))
+        decision = comparison.reason
+        log.info("Georeferencja automatyczna: %s (rozrzut %.2f / %.2f m, obiekty %d, NMAD %.2f / %.2f m)",
+                 decision, comparison.spread_std, comparison.spread_7p, comparison.n_objects,
+                 comparison.nmad_std, comparison.nmad_7p)
+        if comparison.mode == "similarity_nmpt":
+            ctx, results, objects = alt, results_7p, objects_7p
+    qc = _qc_report(ctx)
+    if comparison is not None and qc is not None:
+        from .qc import REC_7P, REC_AUTO
+        qc = qc.without(REC_7P, REC_AUTO)      # zalecenie georeferencji rozstrzygniete porownaniem
     # ctx.config: przy georef.mode "auto" zawiera faktycznie uzyty tryb
     batch = BatchResult(results, skipped, z_calibration=ctx.z_calibration,
-                        config=getattr(ctx, "config", None) or cfg, qc=_qc_report(ctx),
-                        georef_decision=getattr(ctx, "georef_decision", None))
-    batch.objects = aggregate(batch.detections, cfg.aggregate, cfg.size)
+                        config=getattr(ctx, "config", None) or cfg, qc=qc,
+                        georef_decision=decision, georef_comparison=comparison)
+    batch.objects = objects
     log.info("Batch: %d zdjec, %d pominietych, %d detekcji (%d odrzuconych), %d obiektow",
              len(results), len(skipped), len(batch.detections), len(batch.rejected),
              len(batch.objects))

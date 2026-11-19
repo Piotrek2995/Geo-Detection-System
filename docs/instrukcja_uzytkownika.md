@@ -100,9 +100,11 @@ tekstowego (YOLOE)”, „Ludzie (model COCO)”.
    **Automatycznie** bierze NMPT z pobranych arkuszy (teren z budynkami i drzewami), gdy pokrywają
    obszar lotu, a w przeciwnym razie NMT online. Sekcja **Dostępność danych** pokazuje, co jest
    dostępne.
-2. **Georeferencja**: **Automatycznie (zalecane)** sprawdza jakość rekonstrukcji i sam decyduje,
-   czy wystarczy GPS drona, czy model trzeba wyrównać do NMPT GUGiK (gdy jest pochylony albo
-   zdeformowany). Decyzja jest pokazywana jednym zdaniem. Można też wybrać tryb ręcznie.
+2. **Georeferencja**: **Automatycznie (zalecane)** wyrównuje model do NMPT GUGiK od razu, gdy
+   kontrola jakości wykaże wyraźną deformację. W pozostałych przypadkach program liczy położenia
+   obiektów w obu wariantach (bez wyrównania i z wyrównaniem) i wybiera wyrównanie tylko wtedy,
+   gdy wyraźnie zmniejsza rozrzut obiektów widocznych na kilku zdjęciach. Decyzja jest
+   pokazywana jednym zdaniem z liczbami. Można też wybrać tryb ręcznie.
 3. **Kalibracja wysokości**: domyślne dopasowanie modelu do NMT działa bez dodatkowych pomiarów.
 4. **Zaawansowane**: odległość łączenia widoków w jeden obiekt, liczba widoków do potwierdzenia
    obiektu, filtry i foldery arkuszy NMT / NMPT.
@@ -151,14 +153,14 @@ przetworzone zdjęcia i log. **Przerwij** zatrzymuje przebieg bez zapisu wynikó
 | Skala pionowa | wysokości modelu a barometr drona | rekonstrukcja z kalibracją kamery z innego lotu |
 | Kalibracja kamery | ogniskowa modelu; różnica względem EXIF to tylko informacja | jak wyżej, gdy jest kalibracja referencyjna |
 | Zgodność z NMPT | kształt modelu a NMPT GUGiK | sprawdź, czy teren się nie zmienił; wyrównanie do NMPT |
-| Pochylenie modelu | przechył modelu względem NMPT | wyrównanie do NMPT (tryb automatyczny robi to sam) |
+| Pochylenie modelu | przechył modelu względem NMPT; kilka stopni to informacja | duży przechył: wyrównanie do NMPT; mały: tryb automatyczny sprawdzi, czy pomaga |
 | Zasięg lotu | czy obszar lotu wystarcza do ustalenia orientacji z GPS | większy obszar, kilka wysokości, punkty kontrolne |
 
 Kolory: zielony **OK**, żółty **OSTRZEŻENIE** (wyniki użyteczne, ze słabszymi stronami), czerwony
 **ZŁY** (położenia mogą być błędne o kilka metrów), szary **informacja**. Od razu widać
 najważniejsze punkty, reszta jest w sekcji **Szczegóły**. Przy zaleceniu wyrównania do NMPT
-przycisk **Zastosuj** (lub **Zastosuj i uruchom ponownie** na stronie Wyniki) zmienia ustawienie
-za użytkownika.
+albo trybu automatycznego przycisk **Zastosuj** (lub **Zastosuj i uruchom ponownie** na stronie
+Wyniki) zmienia ustawienie za użytkownika.
 
 ## 5. Rozwiązywanie problemów
 

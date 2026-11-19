@@ -20,6 +20,11 @@ Kontrole (progi w cfg.qc):
   baseline        — rozpietosc pozioma kamer vs szum GPS: oczekiwany blad orientacji modelu
                     ~ sqrt(2) * sigma_GPS / rozpietosc [rad] (lot "pilka": 11 m, ~20 deg).
 
+Pochylenie ponizej qc.tilt_warn_deg jest INFORMACJA: 7p nie zawsze pomaga (lot o dobrej geometrii:
+3.9 deg, 7p zwiekszylo rozrzut obiektu statycznego z 0.38 do 1.0 m). Deformacja (skala pionowa poza
+[qc.deform_scale_min, qc.deform_scale_max] albo pochylenie > qc.tilt_warn_deg) -> zalecenie 7p;
+lagodniejsze sygnaly -> zalecenie trybu auto, ktory porownuje oba warianty (compare_georef).
+
 Status: OK / OSTRZEZENIE / ZLY (najgorszy z kontroli) + zalecenia.
 """
 
@@ -40,10 +45,13 @@ OK, WARN, BAD, NA = "OK", "OSTRZEŻENIE", "ZŁY", "brak danych"
 INFO = "informacja"     # wynik do wiadomosci, nie wplywa na ocene (np. ogniskowa vs EXIF)
 _RANK = {NA: -1, INFO: -1, OK: 0, WARN: 1, BAD: 2}
 DIAG_35MM = 43.27
+REPORT_VERSION = 2      # 2: pochylenie < tilt_warn_deg = informacja, 7p zalecane tylko przy deformacji
 
 REC_CALIB = ("ustal kalibrację kamery: ODM --cameras <cameras.json z lotu o dobrej geometrii> "
              "--use-fixed-camera-params (7p tylko skompensuje deformację, nie usunie jej)")
 REC_7P = "rozważ georef.mode: similarity_nmpt (wyrównanie 7p do NMPT)"
+REC_AUTO = ("porównaj georeferencję standardową i 7p na wykrytych obiektach: georef.mode auto "
+            "(7p tylko, gdy zmniejsza rozrzut obiektów)")
 REC_BASE = "słaba geometria lotu: większa baza (obszar, kilka wysokości) albo punkty kontrolne (GCP)"
 
 
@@ -71,25 +79,33 @@ class QcReport:
         out += [f"  zalecenie: {r}" for r in self.recommendations]
         return out
 
+    def without(self, *recs: str) -> "QcReport":
+        """Kopia bez zalecen zaczynajacych sie od podanych (raport w _CACHE jest wspoldzielony)."""
+        return QcReport(self.checks, self.status, [r for r in self.recommendations
+                                                   if not any(r.startswith(x) for x in recs)])
+
     def to_dict(self) -> dict:
-        return json.loads(json.dumps({"status": self.status, "recommendations": self.recommendations,
+        return json.loads(json.dumps({"version": REPORT_VERSION, "status": self.status,
+                                      "recommendations": self.recommendations,
                                       "checks": [c.__dict__ for c in self.checks]}, default=float))
 
     @classmethod
     def from_dict(cls, d: dict) -> "QcReport":
-        """Odwrotnosc to_dict (run_report.json -> panel QC w GUI)."""
         checks = [QcCheck(c["name"], c["status"], c.get("value"), c.get("text", ""), c.get("details") or {})
                   for c in d.get("checks", [])]
-        status = d.get("status", NA)
-        # raporty sprzed statusu "informacja": ogniskowa wzgledem EXIF bywala ostrzezeniem
-        fixed = False
+        if d.get("version", 1) >= REPORT_VERSION:
+            return cls(checks, d.get("status", NA), list(d.get("recommendations", [])))
+        # raporty sprzed reguly v2 (domyslne progi): ogniskowa wzgledem EXIF i male pochylenie to
+        # informacja; zalecenia liczone od nowa (7p tylko przy deformacji)
+        from .config import QcConfig
+        q = QcConfig()
         for c in checks:
             if c.name == "focal" and c.status == WARN and "EXIF" in str(c.details.get("source", "")):
-                c.status, fixed = INFO, True
-        if fixed:
-            status = max((c.status for c in checks), key=lambda x: _RANK[x], default=NA)
-            status = OK if status in (NA, INFO) else status
-        return cls(checks, status, list(d.get("recommendations", [])))
+                c.status = INFO
+            if c.name == "tilt" and c.value is not None and c.status != NA:
+                c.status = _tilt_status(float(c.value), q)
+        aligned = any(str(c.details.get("mode", "")).startswith("similarity") for c in checks)
+        return summarize(checks, aligned=aligned, cfg=q)
 
 
 def _grade(x: float, warn: float, bad: float) -> str:
@@ -97,6 +113,13 @@ def _grade(x: float, warn: float, bad: float) -> str:
 
 
 # ───────────── kontrole (czyste funkcje — testowalne na danych syntetycznych) ─────────────
+
+def _tilt_status(tilt_deg: float, cfg) -> str:
+    """Pochylenie: OK do tilt_info_deg, potem INFORMACJA (typowe przy gps_only, 7p nie zawsze pomaga),
+    OSTRZEZENIE / ZLY dopiero przy deformacji (> tilt_warn_deg / tilt_bad_deg)."""
+    st = _grade(tilt_deg, cfg.tilt_warn_deg, cfg.tilt_bad_deg)
+    return INFO if st == OK and tilt_deg > getattr(cfg, "tilt_info_deg", cfg.tilt_warn_deg) else st
+
 
 def check_vertical_scale(h_odm, alt_exif, cfg) -> QcCheck:
     h, a = np.asarray(h_odm, float), np.asarray(alt_exif, float)
@@ -206,7 +229,7 @@ def check_surface_modes(before: Optional[dict], after: dict, cfg, ref_name: str 
                    f"surowe {fmt('nmad_raw', '')}{after['nmad_raw']:.2f} m (przed → po; n {after['n']}, "
                    f"≤ {cfg.core_radius_m:.0f} m od kamer)",
                    {"before": b, "after": after, "ref": ref_name, "mode": mode})
-    tilt = QcCheck("tilt", _grade(after["tilt_deg"], cfg.tilt_warn_deg, cfg.tilt_bad_deg), after["tilt_deg"],
+    tilt = QcCheck("tilt", _tilt_status(after["tilt_deg"], cfg), after["tilt_deg"],
                    f"pochylenie modelu względem {ref_name}{lab}: {fmt('tilt_deg', '°')}{after['tilt_deg']:.2f}° "
                    f"(azymut spadku {after['tilt_azimuth_deg']:.0f}°)",
                    {"before": b, "after": after, "mode": mode})
@@ -225,10 +248,27 @@ def check_baseline(xy, sigma_gps_m: float, cfg) -> QcCheck:
                    f"modelu ~{rot:.1f}°", {"span_m": span, "sigma_gps_m": sigma_gps_m, "rotation_deg": rot})
 
 
-def summarize(checks: list[QcCheck], aligned: bool = False) -> QcReport:
-    """aligned=True (georef 7p aktywne): bez zalecenia 7p."""
+def deformation(checks: list[QcCheck], cfg=None) -> Optional[str]:
+    """Wyrazna deformacja modelu (georef auto -> 7p bez porownania): powod jednym zdaniem albo None."""
+    if cfg is None:
+        from .config import QcConfig
+        cfg = QcConfig()
+    by = {c.name: c for c in checks}
+    vs = by.get("vertical_scale")
+    if vs and vs.status != NA and vs.value is not None and not (
+            cfg.deform_scale_min <= vs.value <= cfg.deform_scale_max):
+        return f"model jest zdeformowany w pionie (skala {vs.value:.2f})"
+    t = by.get("tilt")
+    if t and t.value is not None and t.status in (WARN, BAD):
+        return f"model jest mocno pochylony ({t.value:.1f}°)"
+    return None
+
+
+def summarize(checks: list[QcCheck], aligned: bool = False, cfg=None) -> QcReport:
+    """aligned=True (georef 7p aktywne): bez zalecen georeferencji. Inaczej: deformacja -> 7p,
+    slabsze sygnaly (ksztalt, pochylenie-informacja, baza) -> tryb auto (porownanie wariantow)."""
     status = max((c.status for c in checks), key=lambda s: _RANK[s], default=NA)
-    if status == NA:
+    if status in (NA, INFO):
         status = OK
     by = {c.name: c for c in checks}
     rec = []
@@ -236,8 +276,12 @@ def summarize(checks: list[QcCheck], aligned: bool = False) -> QcReport:
         by.get("focal") and by["focal"].status == BAD)
     if geom_bad:
         rec.append(REC_CALIB)
-    if not aligned and any(by.get(n) and by[n].status in (WARN, BAD) for n in ("surface", "tilt", "baseline")):
-        rec.append(REC_7P + (" — po ustaleniu kalibracji" if geom_bad else ""))
+    if not aligned:
+        if deformation(checks, cfg):
+            rec.append(REC_7P + (" — po ustaleniu kalibracji" if geom_bad else ""))
+        elif any(by.get(n) and by[n].status in (WARN, BAD) for n in ("surface", "baseline")) or (
+                by.get("tilt") and by["tilt"].status == INFO):
+            rec.append(REC_AUTO)
     if by.get("baseline") and by["baseline"].status == BAD:
         rec.append(REC_BASE)
     return QcReport(checks, status, rec)
@@ -298,7 +342,7 @@ def run_qc(config, rec, frame, dem=None, active=None, mode: str = "gps_only") ->
         base = QcCheck(base.name, WARN, base.value, base.text + " — orientacja z 7p (kontrola: pochylenie "
                        "i NMAD po wyrównaniu)", base.details)
     checks.append(base)
-    rep = summarize(checks, aligned=aligned)
+    rep = summarize(checks, aligned=aligned, cfg=q)
     for line in rep.lines():
         log.info(line)
     _CACHE[key] = rep
@@ -343,6 +387,8 @@ TITLES = {"vertical_scale": "Skala pionowa modelu", "focal": "Kalibracja kamery"
 ACTIONS = {
     REC_CALIB: ("Uruchom rekonstrukcję ponownie z ustaloną kalibracją kamery (strona Projekt).", "odm_fixed_cal"),
     REC_7P: ("Na stronie Georeferencja wybierz wyrównanie do NMPT.", "georef_nmpt"),
+    REC_AUTO: ("Na stronie Georeferencja wybierz tryb automatyczny: porówna oba warianty na wykrytych "
+               "obiektach.", "georef_auto"),
     REC_BASE: ("Przy kolejnym locie obejmij większy obszar, lataj na kilku wysokościach albo dodaj punkty "
                "kontrolne.", None),
 }
@@ -379,6 +425,9 @@ def explain(c: QcCheck) -> str:
             return pre + ("" if st == OK else " Nadal duże, sprawdź kalibrację kamery.")
         if st == OK:
             return f"Model jest prawie poziomy (pochylenie {v:.1f}°)."
+        if st == INFO:
+            return (f"Model jest lekko pochylony ({v:.1f}°). To typowe; wyrównanie do NMPT nie zawsze "
+                    "poprawia wynik.")
         return f"Model jest pochylony o {v:.1f}°, obiekty wysoko nad gruntem będą przesunięte."
     if c.name == "baseline":
         span = d.get("span_m")
@@ -411,16 +460,66 @@ def _rec_key(r: str) -> str:
 
 # ───────────── automatyczny wybor georeferencji ─────────────
 
-def auto_georef_choice(rep: Optional[QcReport]) -> tuple[str, str]:
-    """georef.mode "auto": (tryb, uzasadnienie jednym zdaniem) z QC wariantu gps_only.
-    Wyrownanie do NMPT, gdy QC je zaleca (zly ksztalt, pochylenie albo slaba baza)."""
+def auto_georef_choice(rep: Optional[QcReport], cfg=None) -> tuple[Optional[str], str]:
+    """georef.mode "auto", etap 1 (QC wariantu gps_only): ("similarity_nmpt", powod) przy deformacji,
+    ("gps_only", powod) bez danych do kontroli, (None, opis) = rozstrzygnie compare_georef."""
     if rep is None:
         return "gps_only", "Wybrano standard (GPS drona), bo brak danych do kontroli jakości."
-    by = {c.name: c for c in rep.checks}
-    bad = [by[n] for n in ("tilt", "surface", "baseline") if n in by and by[n].status in (WARN, BAD)]
-    if not bad:
-        return "gps_only", "Wybrano standard (GPS drona), bo model jest zgodny z NMPT GUGiK."
-    c = bad[0]
-    why = {"tilt": f"model jest pochylony o {c.value:.1f}°" if c.value is not None else "model jest pochylony",
-           "surface": "kształt modelu odbiega od NMPT", "baseline": "zasięg lotu jest mały"}[c.name]
-    return "similarity_nmpt", f"Wybrano wyrównanie do NMPT, bo {why}."
+    why = deformation(rep.checks, cfg)
+    if why:
+        return "similarity_nmpt", f"Wybrano wyrównanie do NMPT, bo {why}."
+    return None, ("Model nie jest wyraźnie zdeformowany; o wyrównaniu do NMPT zdecyduje porównanie "
+                  "rozrzutu wykrytych obiektów.")
+
+
+@dataclass
+class GeorefComparison:
+    """Porownanie wariantow gps_only i 7p na tych samych detekcjach (georef.mode auto, etap 2)."""
+    mode: str                       # wybrany: gps_only | similarity_nmpt
+    reason: str                     # jedno zdanie z liczbami (GUI, raport)
+    spread_std: float = float("nan")    # rozrzut wielowidokowy [m], obiekty potwierdzone >= min_views
+    spread_7p: float = float("nan")
+    n_objects: int = 0              # liczba obiektow w mierze rozrzutu (wariant standard)
+    nmad_std: float = float("nan")  # NMAD reszt DSM ODM - NMPT [m]
+    nmad_7p: float = float("nan")
+
+
+def _fin(*v) -> bool:
+    return all(x is not None and math.isfinite(x) for x in v)
+
+
+def compare_georef(spread_std: float, spread_7p: float, n_objects: int, nmad_std: float, nmad_7p: float,
+                   cfg) -> GeorefComparison:
+    """Etap 2 reguly auto. cfg: GeorefConfig (auto_spread_gain, auto_resid_tol_m).
+    7p tylko gdy rozrzut obiektow spada o > auto_spread_gain i reszty DSM - NMPT nie rosna
+    (o > auto_resid_tol_m). Bez obiektow potwierdzonych: decyduja reszty (spadek o > auto_spread_gain)."""
+    gain, tol = cfg.auto_spread_gain, cfg.auto_resid_tol_m
+    args = (spread_std, spread_7p, n_objects, nmad_std, nmad_7p)
+    resid_ok = not _fin(nmad_std, nmad_7p) or nmad_7p <= nmad_std + tol
+    if n_objects > 0 and _fin(spread_std, spread_7p):
+        sp = f"z {spread_std:.2f} do {spread_7p:.2f} m"
+        if spread_7p < (1 - gain) * spread_std:
+            if resid_ok:
+                return GeorefComparison("similarity_nmpt", f"Wybrano wyrównanie do NMPT: rozrzut obiektów spadł {sp}.",
+                                        *args)
+            return GeorefComparison("gps_only", f"Wybrano standard: wyrównanie do NMPT zmniejszyłoby rozrzut obiektów "
+                                    f"{sp}, ale pogorszyłoby zgodność z NMPT (z {nmad_std:.2f} do {nmad_7p:.2f} m).",
+                                    *args)
+        what = ("zwiększyłoby rozrzut obiektów" if spread_7p > spread_std
+                else "nie zmniejszyłoby wyraźnie rozrzutu obiektów")
+        return GeorefComparison("gps_only", f"Wybrano standard: wyrównanie do NMPT {what} {sp}.", *args)
+    if _fin(nmad_std, nmad_7p):
+        rs = f"z {nmad_std:.2f} do {nmad_7p:.2f} m"
+        if nmad_7p < (1 - gain) * nmad_std:
+            return GeorefComparison("similarity_nmpt", "Wybrano wyrównanie do NMPT: brak obiektów widocznych na kilku "
+                                    f"zdjęciach, a różnice względem NMPT spadły {rs}.", *args)
+        return GeorefComparison("gps_only", "Wybrano standard: brak obiektów widocznych na kilku zdjęciach, a "
+                                f"wyrównanie do NMPT nie zmniejszyło wyraźnie różnic względem NMPT ({rs}).", *args)
+    return GeorefComparison("gps_only", "Wybrano standard (GPS drona): brak danych do porównania wariantów.", *args)
+
+
+def surface_nmad(rep: Optional[QcReport]) -> float:
+    """NMAD reszt DSM ODM - NMPT (surowe) dla trybu aktywnego raportu; nan gdy brak."""
+    c = rep.check("surface") if rep is not None else None
+    after = (c.details or {}).get("after") if c is not None else None
+    return float(after["nmad_raw"]) if after and after.get("nmad_raw") is not None else float("nan")

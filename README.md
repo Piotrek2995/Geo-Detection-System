@@ -254,6 +254,7 @@ wyłącznie z GPS drona, błędne mogą być też skala, obrót i pochylenie. `g
 | tryb | opis |
 |---|---|
 | `gps_only` (domyślny) | georeferencja ODM + `z_offset` z `z_anchor` |
+| `auto` | deformacja w QC (skala pionowa poza [`qc.deform_scale_min`, `qc.deform_scale_max`] albo pochylenie > `qc.tilt_warn_deg`) → `similarity_nmpt`; inaczej geometria w obu wariantach na tych samych detekcjach i 7p tylko, gdy rozrzut obiektów potwierdzonych (≥ `auto_min_views` widoków) spada o > `auto_spread_gain`, a NMAD reszt DSM − NMPT nie rośnie (bez obiektów: decydują reszty) |
 | `similarity_nmpt` | transformacja 7p (tx, ty, tz, rx, ry, rz, skala) z dopasowania DSM ODM do NMPT GUGiK (`surface.nmpt_dir`) |
 
 W trybie `similarity_nmpt` obserwacje są dwie. Pierwsza to odległość punktów DSM ODM do NMPT, pionowa
